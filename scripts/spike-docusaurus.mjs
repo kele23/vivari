@@ -262,7 +262,7 @@ console.log(`  listening on ${PORT}: ${bound}  (${((Date.now() - tb) / 1000).toF
 let getOk = false;
 if (bound) {
   const decode = (b) => (typeof b === "string" ? b : Buffer.from(b).toString());
-  const get = (url) => kernel.handleHttpRequest(PORT, { port: PORT, method: "GET", url, headers: { host: "127.0.0.1:" + PORT }, body: "" });
+  const get = (url) => kernel.handleHttpRequest(PORT, { port: PORT, method: "GET", url, headers: { host: "localhost:" + PORT }, body: "" });
   // Mirror the SW's keep-prefix behaviour: request paths exactly as the browser
   // would under this baseUrl (the dev server serves the app AT baseUrl).
   const home = BASEURL;

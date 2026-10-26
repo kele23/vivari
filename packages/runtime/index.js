@@ -1017,7 +1017,10 @@ export function createRuntime({
           port,
           method: req.method || "GET",
           path: req.url || "/",
-          headers: pickHeaders(req.headers, ["host", "content-length"]),
+          // Preserve the caller's Host. Browser requests normally cannot supply
+          // one and ClientRequest generates 127.0.0.1, while headless callers
+          // use localhost to satisfy current webpack-dev-server host validation.
+          headers: pickHeaders(req.headers, ["content-length"]),
         },
         (cres) => {
           const chunks = [];

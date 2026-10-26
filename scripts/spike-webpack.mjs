@@ -245,7 +245,7 @@ console.log(`  listening on ${PORT}: ${bound}  (${((Date.now() - tb) / 1000).toF
 let getOk = false;
 if (bound) {
   const decode = (b) => (typeof b === "string" ? b : Buffer.from(b).toString());
-  const get = (url) => kernel.handleHttpRequest(PORT, { port: PORT, method: "GET", url, headers: { host: "127.0.0.1:" + PORT }, body: "" });
+  const get = (url) => kernel.handleHttpRequest(PORT, { port: PORT, method: "GET", url, headers: { host: "localhost:" + PORT }, body: "" });
   let root = await get("/");
   for (let i = 0; i < 60 && (root.status === 502 || root.status === 404 || root.status >= 500); i++) {
     await new Promise((r) => setTimeout(r, 1000));

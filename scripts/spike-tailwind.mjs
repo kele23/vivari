@@ -149,6 +149,7 @@ kernel.writeFile(
         // or the dev server dies with "Cannot find native binding". Same line, same
         // reason, as the sixteen vite:^8 templates.
         "@rolldown/binding-wasm32-wasi": "~1.2.0",
+        "@napi-rs/wasm-runtime": "1.2.5",
         tailwindcss: "^4.0.0",
         vite: "^8.0.0",
       },

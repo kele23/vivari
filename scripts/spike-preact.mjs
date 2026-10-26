@@ -24,7 +24,7 @@ const ok = await runViteSpike({
   "type": "module",
   "scripts": { "dev": "vite", "build": "vite build", "preview": "vite preview" },
   "dependencies": { "preact": "^10.25.0" },
-  "devDependencies": { "@preact/preset-vite": "^2.9.0", "typescript": "^5.7.0", "vite": "^8.0.0", "@rolldown/binding-wasm32-wasi": "~1.2.0" }
+  "devDependencies": { "@preact/preset-vite": "^2.9.0", "typescript": "^5.7.0", "vite": "^8.0.0", "@rolldown/binding-wasm32-wasi": "~1.2.0", "@napi-rs/wasm-runtime": "1.2.5" }
 }
 `,
     "vite.config.ts": `import { defineConfig } from 'vite'

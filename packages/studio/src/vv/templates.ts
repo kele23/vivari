@@ -140,6 +140,11 @@ export interface TemplateDef {
 // command loads its config with `--configLoader native` (npm eats the first --).
 const VITE_DEV = "npm run dev -- --configLoader native";
 
+// Keep this exact pin beside every Vite 8 wasm binding below. wasm-runtime 1.2.6
+// changed its @emnapi peer range to beta.2 while the binding still supplies
+// alpha.5; npm then installs two incompatible providers and Rolldown cannot load.
+// Remove the pins together once the binding and runtime publish compatible peers.
+
 // ── Shared Vite bits ─────────────────────────────────────────────────────────
 const VITE_INDEX_CSS = `:root {
   font-family: system-ui, Avenir, Helvetica, Arial, sans-serif;
@@ -176,6 +181,7 @@ const reactPkg = (ts: boolean) => `{
   "devDependencies": {
     "@vitejs/plugin-react": "^5.0.0",
     "@rolldown/binding-wasm32-wasi": "~1.2.0",
+    "@napi-rs/wasm-runtime": "1.2.5",
     "vite": "^8.0.0"${ts ? `,
     "@types/react": "^19.0.0",
     "@types/react-dom": "^19.0.0",
@@ -315,6 +321,7 @@ const vuePkg = (ts: boolean) => `{
   "devDependencies": {
     "@vitejs/plugin-vue": "^6.0.0",
     "@rolldown/binding-wasm32-wasi": "~1.2.0",
+    "@napi-rs/wasm-runtime": "1.2.5",
     "vite": "^8.0.0"${ts ? `,
     "typescript": "^5.7.0",
     "vue-tsc": "^2.2.0"` : ""}
@@ -838,6 +845,9 @@ export class AppService {
 `,
 };
 
+// Keep the CLI and its root webpack singleton aligned. CLI 11.0.24 bundles
+// webpack 5.106.2, while npm otherwise hoists 5.112.x for
+// fork-ts-checker-webpack-plugin and creates an incompatible split peer tree.
 function nestTemplate(): TemplateDef {
   return {
       manifest: {
@@ -876,7 +886,8 @@ function nestTemplate(): TemplateDef {
     "rxjs": "^7.8.1"
   },
   "devDependencies": {
-    "@nestjs/cli": "^11.0.0",
+    "@nestjs/cli": "11.0.24",
+    "webpack": "5.106.2",
     "@nestjs/schematics": "^11.0.0",
     "@types/node": "^22.10.7",
     "source-map-support": "^0.5.21",
@@ -972,6 +983,7 @@ function wsDemoTemplate(): TemplateDef {
   },
   "devDependencies": {
     "@rolldown/binding-wasm32-wasi": "~1.2.0",
+    "@napi-rs/wasm-runtime": "1.2.5",
     "vite": "^8.0.0"
   }
 }
@@ -1351,6 +1363,7 @@ function vanillaTemplate(ts: boolean): TemplateDef {
   },
   "devDependencies": {
     "@rolldown/binding-wasm32-wasi": "~1.2.0",
+    "@napi-rs/wasm-runtime": "1.2.5",
     "vite": "^8.0.0"${ts ? `,
     "typescript": "^5.7.0"` : ""}
   }
@@ -1531,7 +1544,7 @@ function bootstrapTemplate(): TemplateDef {
   "type": "module",
   "scripts": { "dev": "vite", "build": "vite build", "preview": "vite preview" },
   "dependencies": { "bootstrap": "^5.3.3" },
-  "devDependencies": { "typescript": "^5.7.0", "@rolldown/binding-wasm32-wasi": "~1.2.0", "vite": "^8.0.0" }
+  "devDependencies": { "typescript": "^5.7.0", "@rolldown/binding-wasm32-wasi": "~1.2.0", "@napi-rs/wasm-runtime": "1.2.5", "vite": "^8.0.0" }
 }
 `,
       "index.html": `<!doctype html>
@@ -1610,7 +1623,7 @@ function threeTemplate(): TemplateDef {
   "type": "module",
   "scripts": { "dev": "vite", "build": "vite build", "preview": "vite preview" },
   "dependencies": { "three": "^0.171.0" },
-  "devDependencies": { "@types/three": "^0.171.0", "typescript": "^5.7.0", "@rolldown/binding-wasm32-wasi": "~1.2.0", "vite": "^8.0.0" }
+  "devDependencies": { "@types/three": "^0.171.0", "typescript": "^5.7.0", "@rolldown/binding-wasm32-wasi": "~1.2.0", "@napi-rs/wasm-runtime": "1.2.5", "vite": "^8.0.0" }
 }
 `,
       "index.html": `<!doctype html>
@@ -1700,7 +1713,7 @@ function gsapReactTemplate(): TemplateDef {
   "type": "module",
   "scripts": { "dev": "vite", "build": "vite build", "preview": "vite preview" },
   "dependencies": { "gsap": "^3.12.5", "react": "^19.0.0", "react-dom": "^19.0.0" },
-  "devDependencies": { "@vitejs/plugin-react": "^5.0.0", "@rolldown/binding-wasm32-wasi": "~1.2.0", "vite": "^8.0.0" }
+  "devDependencies": { "@vitejs/plugin-react": "^5.0.0", "@rolldown/binding-wasm32-wasi": "~1.2.0", "@napi-rs/wasm-runtime": "1.2.5", "vite": "^8.0.0" }
 }
 `,
       "vite.config.js": reactViteConfig,
@@ -7526,7 +7539,7 @@ function fullstackTemplate(): TemplateDef {
     "client": "vite --configLoader native --port 5173 --strictPort"
   },
   "dependencies": { "express": "^4.21.0", "react": "^19.0.0", "react-dom": "^19.0.0" },
-  "devDependencies": { "@vitejs/plugin-react": "^5.0.0", "@rolldown/binding-wasm32-wasi": "~1.2.0", "vite": "^8.0.0" }
+  "devDependencies": { "@vitejs/plugin-react": "^5.0.0", "@rolldown/binding-wasm32-wasi": "~1.2.0", "@napi-rs/wasm-runtime": "1.2.5", "vite": "^8.0.0" }
 }
 `,
       "dev.js": `const { spawn } = require('child_process');
@@ -7708,6 +7721,7 @@ function svelteKitTemplate(): TemplateDef {
     "@sveltejs/vite-plugin-svelte": "^7.0.0",
     "svelte": "^5.46.4",
     "@rolldown/binding-wasm32-wasi": "~1.2.0",
+    "@napi-rs/wasm-runtime": "1.2.5",
     "vite": "^8.0.0"
   }
 }
@@ -7800,6 +7814,7 @@ function remixTemplate(): TemplateDef {
   "devDependencies": {
     "@react-router/dev": "^7.1.0",
     "@rolldown/binding-wasm32-wasi": "~1.2.0",
+    "@napi-rs/wasm-runtime": "1.2.5",
     "vite": "^8.0.0"
   }
 }
@@ -8025,7 +8040,7 @@ function preactTemplate(): TemplateDef {
   "type": "module",
   "scripts": { "dev": "vite", "build": "vite build", "preview": "vite preview" },
   "dependencies": { "preact": "^10.25.0" },
-  "devDependencies": { "@preact/preset-vite": "^2.9.0", "typescript": "^5.7.0", "@rolldown/binding-wasm32-wasi": "~1.2.0", "vite": "^8.0.0" }
+  "devDependencies": { "@preact/preset-vite": "^2.9.0", "typescript": "^5.7.0", "@rolldown/binding-wasm32-wasi": "~1.2.0", "@napi-rs/wasm-runtime": "1.2.5", "vite": "^8.0.0" }
 }
 `,
       "vite.config.ts": `import { defineConfig } from 'vite'
@@ -8116,7 +8131,7 @@ function litTemplate(): TemplateDef {
   "type": "module",
   "scripts": { "dev": "vite", "build": "vite build", "preview": "vite preview" },
   "dependencies": { "lit": "^3.2.0" },
-  "devDependencies": { "typescript": "^5.7.0", "@rolldown/binding-wasm32-wasi": "~1.2.0", "vite": "^8.0.0" }
+  "devDependencies": { "typescript": "^5.7.0", "@rolldown/binding-wasm32-wasi": "~1.2.0", "@napi-rs/wasm-runtime": "1.2.5", "vite": "^8.0.0" }
 }
 `,
       "index.html": `<!doctype html>
@@ -8204,7 +8219,7 @@ function solidTemplate(): TemplateDef {
   "type": "module",
   "scripts": { "dev": "vite", "build": "vite build", "preview": "vite preview" },
   "dependencies": { "solid-js": "^1.9.0" },
-  "devDependencies": { "typescript": "^5.7.0", "@rolldown/binding-wasm32-wasi": "~1.2.0", "vite": "^8.0.0", "vite-plugin-solid": "^2.11.0" }
+  "devDependencies": { "typescript": "^5.7.0", "@rolldown/binding-wasm32-wasi": "~1.2.0", "@napi-rs/wasm-runtime": "1.2.5", "vite": "^8.0.0", "vite-plugin-solid": "^2.11.0" }
 }
 `,
       "vite.config.ts": `import { defineConfig } from 'vite'
@@ -8909,7 +8924,7 @@ function trpcTemplate(): TemplateDef {
     "react-dom": "^19.0.0",
     "zod": "^3.24.0"
   },
-  "devDependencies": { "@vitejs/plugin-react": "^5.0.0", "typescript": "^5.7.0", "@rolldown/binding-wasm32-wasi": "~1.2.0", "vite": "^8.0.0" }
+  "devDependencies": { "@vitejs/plugin-react": "^5.0.0", "typescript": "^5.7.0", "@rolldown/binding-wasm32-wasi": "~1.2.0", "@napi-rs/wasm-runtime": "1.2.5", "vite": "^8.0.0" }
 }
 `,
       "dev.js": `const { spawn } = require('child_process');
@@ -9058,7 +9073,7 @@ function monorepoTemplate(): TemplateDef {
   "type": "module",
   "scripts": { "dev": "vite", "build": "vite build", "preview": "vite preview" },
   "dependencies": { "@repo/ui": "workspace:*", "react": "^19.0.0", "react-dom": "^19.0.0" },
-  "devDependencies": { "@vitejs/plugin-react": "^5.0.0", "@rolldown/binding-wasm32-wasi": "~1.2.0", "vite": "^8.0.0" }
+  "devDependencies": { "@vitejs/plugin-react": "^5.0.0", "@rolldown/binding-wasm32-wasi": "~1.2.0", "@napi-rs/wasm-runtime": "1.2.5", "vite": "^8.0.0" }
 }
 `,
       "apps/web/vite.config.js": reactViteConfig,
@@ -10611,6 +10626,7 @@ function emberTemplate(): TemplateDef {
     "@glimmer/component": "^2.1.1",
     "@rollup/plugin-babel": "^7.1.0",
     "@rolldown/binding-wasm32-wasi": "~1.2.0",
+    "@napi-rs/wasm-runtime": "1.2.5",
     "babel-plugin-ember-template-compilation": "^4.0.0",
     "decorator-transforms": "^2.3.2",
     "ember-source": "${EMBER}",
@@ -10879,6 +10895,7 @@ function tailwindTemplate(): TemplateDef {
     "tailwindcss": "^4.0.0",
     "typescript": "^5.7.0",
     "@rolldown/binding-wasm32-wasi": "~1.2.0",
+    "@napi-rs/wasm-runtime": "1.2.5",
     "vite": "^8.0.0"
   }
 }

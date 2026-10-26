@@ -35,6 +35,7 @@ const ok = await runViteSpike({
   "devDependencies": {
     "@vitejs/plugin-vue": "^6.0.0",
     "@rolldown/binding-wasm32-wasi": "~1.2.0",
+        "@napi-rs/wasm-runtime": "1.2.5",
     "vite": "^8.0.0",
     "typescript": "^5.7.0",
     "vue-tsc": "^2.2.0"

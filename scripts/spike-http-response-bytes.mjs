@@ -95,12 +95,38 @@ const h = await bootSpikeKernel();
 // its own gate, and whose bugs would otherwise be blamed on this one).
 writeProject(h.kernel, DIR, {
   "server.js": `const http = require('http');
+const url = require('url');
 ${GEN_SRC}
 const CASES = ${JSON.stringify(
     CASES.map(([label, buf, ct, , generated]) => [label, generated ? null : buf.toString("base64"), ct, generated || null]),
   )};
 const bodies = CASES.map(([, b64, , g]) => (g ? { bin, latin, text }[g[0]](g[1]) : Buffer.from(b64, 'base64')));
 http.createServer((req, res) => {
+  if (req.url === '/host') {
+    const host = req.headers.host || '';
+    res.end(host + '|' + url.parse('//' + host, false, true).hostname);
+    return;
+  }
+  if (req.url === '/url-cases') {
+    const fields = (value) => {
+      const parsed = url.parse(value, false, true);
+      return {
+        host: parsed.host,
+        hostname: parsed.hostname,
+        pathname: parsed.pathname,
+        path: parsed.path,
+      };
+    };
+    res.setHeader('content-type', 'application/json');
+    res.end(JSON.stringify([
+      fields('//example.com'),
+      fields('//example.com?x'),
+      fields('//[::1]:8080'),
+      fields('//bad host'),
+      fields('//foo:bar'),
+    ]));
+    return;
+  }
   const i = Number(req.url.slice(1));
   const ct = CASES[i] && CASES[i][2];
   res.writeHead(200, ct ? { 'content-type': ct } : {});
@@ -152,6 +178,44 @@ for (let i = 0; i < CASES.length; i++) {
 
   console.log(`  ${ok ? "ok  " : "FAIL"}  ${label.padEnd(34)} ${String(want.length).padStart(9)} B  ${enc}${why}`);
 }
+
+const host = `localhost:${PORT}`;
+const hostRes = await h.kernel.handleHttpRequest(PORT, {
+  port: PORT,
+  method: "GET",
+  url: "/host",
+  headers: { host },
+  body: "",
+});
+const hostOk = hostRes.status === 200 && hostRes.body === `${host}|localhost`;
+if (!hostOk) failed++;
+console.log(`  ${hostOk ? "ok  " : "FAIL"}  inbound Host + protocol-relative url.parse`);
+
+const urlRes = await h.kernel.handleHttpRequest(PORT, {
+  port: PORT,
+  method: "GET",
+  url: "/url-cases",
+  headers: { host },
+  body: "",
+});
+let urlCases = [];
+try {
+  urlCases = JSON.parse(urlRes.body);
+} catch {
+  /* asserted below */
+}
+const urlOk =
+  urlRes.status === 200 &&
+  JSON.stringify(urlCases) ===
+    JSON.stringify([
+      { host: "example.com", hostname: "example.com", pathname: null, path: null },
+      { host: "example.com", hostname: "example.com", pathname: null, path: "?x" },
+      { host: "[::1]:8080", hostname: "::1", pathname: null, path: null },
+      { host: "bad", hostname: "bad", pathname: "%20host", path: "%20host" },
+      { host: "foo", hostname: "foo", pathname: "/:bar", path: "/:bar" },
+    ]);
+if (!urlOk) failed++;
+console.log(`  ${urlOk ? "ok  " : "FAIL"}  legacy url.parse host-only, IPv6, and malformed authorities`);
 
 console.log(`\nRESULT: ${failed === 0 ? `PASS — ${CASES.length} response bodies exact` : `FAIL — ${failed}/${CASES.length}`}`);
 process.exit(failed === 0 ? 0 : 1);
