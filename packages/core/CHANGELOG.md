@@ -3,6 +3,12 @@
 From 1.1.0 on, entries are generated from [changesets](https://github.com/changesets/changesets).
 `@vivari/core` and `@vivari/react` are released together under the same version.
 
+## 1.1.3
+
+### Patch Changes
+
+- [`f469db1`](https://github.com/maitrungduc1410/vivari/commit/f469db17ab58c7c3608e699f0605b6afd4e5ba43) Thanks [@maitrungduc1410](https://github.com/maitrungduc1410)! - Preserve inbound Host headers and make the browser runtime's legacy `url.parse` compatible with protocol-relative host strings used by current development servers.
+
 ## 1.1.2
 
 ### Patch Changes
