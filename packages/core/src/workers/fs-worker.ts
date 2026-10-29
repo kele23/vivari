@@ -30,6 +30,10 @@ let vfsRef = null; // the live VFS, set as soon as it's constructed (pre-restore
 let depCache = null; // lockfile-keyed node_modules snapshot cache (P1)
 let accessRef = null; // the vfs-bound facade, shared by persistence + dep cache
 let compressionOn = false; // whole-file lazy compression gate (URL ?compress=1)
+// Subtrees to leave on OPFS at boot (BootOptions.deferRestoreRoots): their manifest
+// entries are read but not replayed into the VFS until a hydrate request asks for
+// them (the studio asks when the user opens that project). null = nothing deferred.
+let deferRestoreRoots = null;
 const queue = []; // messages that arrive before the VFS finishes booting
 
 // Apply the current compression gate to the VFS. Guarded so an older wasm build
@@ -73,6 +77,35 @@ function handle(msg) {
       break;
     case "fs-flush": // page is hiding — best-effort force the mirror to disk
       if (server && server.persistence) server.persistence.flush();
+      break;
+    // Materialize the subtrees the boot pass deferred for one project the user just
+    // opened. The caller awaits this reply before it reads the project, and the paths
+    // involved are exactly the ones this tab did not have in the VFS at all, so the
+    // replay cannot race anything it was already using.
+    case "fs-restore-roots":
+      (async () => {
+        try {
+          let announced = false;
+          const count =
+            server && server.persistence
+              ? await server.persistence.hydrate(msg.roots || [], (done, total) => {
+                  if (total < 400) return; // small project: restore is instant, stay quiet
+                  if (!announced) {
+                    post("log", {
+                      line: `  [opfs] restoring project files (${total} entries)…`,
+                      cls: "muted",
+                    });
+                    announced = true;
+                  } else if (done && done < total) {
+                    post("log", { line: `  [opfs] restoring… ${done}/${total}`, cls: "muted" });
+                  }
+                })
+              : 0;
+          post("fs-restore-roots-ok", { id: msg.id, count });
+        } catch (err) {
+          post("fs-restore-roots-err", { id: msg.id, error: String(err?.message || err) });
+        }
+      })();
       break;
     case "fs-mem": {
       // Diagnostic: report the VFS's in-RAM content footprint (see the studio's
@@ -156,6 +189,13 @@ self.onmessage = (event) => {
   if (d && d.type === "fs-set-compression") {
     compressionOn = !!d.on;
     applyCompression();
+    return;
+  }
+  // Which subtrees to leave on OPFS at boot. Like the compression gate this must be
+  // known BEFORE the restore below runs, so it is queued in its own channel instead
+  // of waiting in `queue` for the VFS to exist.
+  if (d && d.type === "fs-defer-roots") {
+    deferRestoreRoots = Array.isArray(d.roots) ? d.roots.map(String) : [];
     return;
   }
   if (server) handle(d);
@@ -369,22 +409,35 @@ async function createOpfsDepStorage() {
       // "stall" is real work, not a hang. Only chatter when there's a lot to do.
       const t0 = Date.now();
       let announced = false;
-      const n = await persistence.restore((done, total) => {
-        // Structured progress for the host UI (relayed by the kernel worker as
-        // `boot-progress`). Always emitted — even for small projects — so a
-        // progress bar can fill and settle instead of never appearing.
-        post("boot-progress", { phase: "restore", done, total });
-        if (total < 400) return; // small project: restore is instant, stay quiet
-        if (!announced) {
-          post("log", { line: `  [opfs] restoring saved project (${total} entries)…`, cls: "muted" });
-          announced = true;
-        } else if (done && done < total) {
-          post("log", { line: `  [opfs] restoring… ${done}/${total}`, cls: "muted" });
-        }
-      });
-      if (n > 0)
+      // The embedder names the subtrees it would rather pay for on demand (the
+      // studio: every project it knows about). Everything else — the package-manager
+      // caches, anything the embedder did not claim — is replayed as before.
+      const roots = deferRestoreRoots || [];
+      const isDeferred = roots.length
+        ? (p) => roots.some((r) => p === r || p.startsWith(r + "/"))
+        : undefined;
+      const { restored, deferred } = await persistence.restore(
+        (done, total) => {
+          // Structured progress for the host UI (relayed by the kernel worker as
+          // `boot-progress`). Always emitted — even for small projects — so a
+          // progress bar can fill and settle instead of never appearing.
+          post("boot-progress", { phase: "restore", done, total });
+          if (total < 400) return; // small project: restore is instant, stay quiet
+          if (!announced) {
+            post("log", { line: `  [opfs] restoring saved project (${total} entries)…`, cls: "muted" });
+            announced = true;
+          } else if (done && done < total) {
+            post("log", { line: `  [opfs] restoring… ${done}/${total}`, cls: "muted" });
+          }
+        },
+        isDeferred ? { isDeferred } : {},
+      );
+      if (restored > 0 || deferred > 0)
         post("log", {
-          line: `  [opfs] restored ${n} entries from a previous session (${Date.now() - t0}ms)`,
+          line:
+            `  [opfs] restored ${restored} entries from a previous session` +
+            (deferred ? ` (${deferred} deferred until their project opens)` : "") +
+            ` (${Date.now() - t0}ms)`,
           cls: "muted",
         });
     }

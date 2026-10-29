@@ -45,6 +45,17 @@ export interface BootOptions {
    */
   netRelay?: string;
   /**
+   * Project roots whose persisted files are NOT restored at boot. Anything under one
+   * of these stays in the OPFS mirror (and in its index) but is left out of this
+   * tab's VFS until the app asks for it with a `vv-restore-roots` request
+   * (`{ roots: [...] }` through `vivari.internal.request`), which resolves once
+   * those entries are readable. Use it when the origin holds many projects: a tab
+   * then pays RAM and boot time only for the projects it opens, instead of every
+   * project it *could* open. Paths outside the list restore exactly as before, and a
+   * deferred path that is later written is mirrored like any other.
+   */
+  deferRestoreRoots?: readonly string[];
+  /**
    * The preview Service Worker. It must be served **same-origin** at a scope that
    * covers the URLs you want proxied into the VM (default scope `/`). Pass a URL
    * string to override the default (`"/sw.js"`), or `false` to skip registration

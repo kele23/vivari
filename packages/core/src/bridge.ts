@@ -689,9 +689,20 @@ export class KernelBridge {
       .catch(() => {});
   }
 
-  /** Start the kernel (spawns fs/fetcher workers + VFS, then posts `ready`). */
-  boot(compress = true, netRelay?: string) {
-    this.worker.postMessage({ type: "init", compress, netRelay: netRelay || undefined });
+  /**
+   * Start the kernel (spawns fs/fetcher workers + VFS, then posts `ready`).
+   *
+   * `deferRestoreRoots` (BootOptions.deferRestoreRoots) names project roots whose
+   * persisted files stay on OPFS at boot; hydrate one with a `vv-restore-roots`
+   * request once the project is actually opened.
+   */
+  boot(compress = true, netRelay?: string, deferRestoreRoots?: readonly string[]) {
+    this.worker.postMessage({
+      type: "init",
+      compress,
+      netRelay: netRelay || undefined,
+      deferRestoreRoots: deferRestoreRoots?.length ? [...deferRestoreRoots] : undefined,
+    });
   }
 
   /**
