@@ -44,8 +44,21 @@ function log(msg) {
 }
 
 if (fs.existsSync(OUT_FILE) && !force) {
-  log(`asset already present: ${path.relative(ROOT, OUT_FILE)} (use --force to rebuild)`);
-  process.exit(0);
+  // The header carries the version the pack was built from. Reusing a pack whose
+  // stamp disagrees with the pin would silently ship the other pnpm, so compare.
+  let stamped = "";
+  try {
+    const raw = zlib.gunzipSync(fs.readFileSync(OUT_FILE));
+    const headerLen = raw.readUInt32LE(0);
+    stamped = JSON.parse(raw.subarray(4, 4 + headerLen).toString("utf8")).version || "";
+  } catch {
+    /* unreadable header → treat as stale */
+  }
+  if (stamped === PNPM_VERSION) {
+    log(`asset already present: ${path.relative(ROOT, OUT_FILE)} (use --force to rebuild)`);
+    process.exit(0);
+  }
+  log(`existing ${path.relative(ROOT, OUT_FILE)} is pnpm@${stamped || "?"} — rebuilding …`);
 }
 
 // 1) Vendor a pinned pnpm into a scratch dir (host npm/network needed once).
