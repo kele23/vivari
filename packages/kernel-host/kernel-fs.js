@@ -262,6 +262,12 @@ export function createKernelFs(fsWorker) {
       fsWorker.postMessage({ type: "dep-cache-import", id, key, archive, aliases }, [archive.buffer]);
     });
   }
+  // Replay the OPFS subtrees the FS worker deferred at boot (see
+  // BootOptions.deferRestoreRoots) for a project the embedder just opened. Resolves
+  // with the number of entries materialized into the VFS.
+  function restoreRoots(roots) {
+    return depCacheCall("fs-restore-roots", { roots: Array.isArray(roots) ? roots : [] });
+  }
 
   // Vivari.snapshot()/restore() (dep-cache.js snapshotTreeOp/restoreTreeOp). The
   // snapshot comes back transferred; restore TRANSFERS `bytes` in, so the caller's
@@ -317,7 +323,7 @@ export function createKernelFs(fsWorker) {
     } else if (msg.type === "dep-cache-has-ok") {
       const p = pending.get(msg.id);
       if (p) { pending.delete(msg.id); p.resolve(!!msg.has); }
-    } else if (msg.type === "dep-cache-restore-ok") {
+    } else if (msg.type === "dep-cache-restore-ok" || msg.type === "fs-restore-roots-ok") {
       const p = pending.get(msg.id);
       if (p) { pending.delete(msg.id); p.resolve(msg.count | 0); }
     } else if (msg.type === "dep-cache-save-ok" || msg.type === "dep-cache-import-ok") {
@@ -326,6 +332,7 @@ export function createKernelFs(fsWorker) {
     } else if (
       msg.type === "dep-cache-has-err" ||
       msg.type === "dep-cache-restore-err" ||
+      msg.type === "fs-restore-roots-err" ||
       msg.type === "dep-cache-save-err" ||
       msg.type === "dep-cache-import-err"
     ) {
@@ -411,6 +418,8 @@ export function createKernelFs(fsWorker) {
     depCacheImport,
     snapshotTree,
     restoreTree,
+    // Fork-only: hydrate the subtrees BootOptions.deferRestoreRoots held back at boot.
+    restoreRoots,
     // Called by the Kernel constructor to receive fetched-body read completions.
     setBodyConsumedHandler(fn) {
       onBodyConsumed = fn;
