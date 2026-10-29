@@ -3,6 +3,12 @@
 From 1.1.0 on, entries are generated from [changesets](https://github.com/changesets/changesets).
 `@vivari/core` and `@vivari/react` are released together under the same version.
 
+## 1.1.4
+
+### Patch Changes
+
+- [`3921534`](https://github.com/maitrungduc1410/vivari/commit/39215341e186579f08ecebeff0126ee43056b528) Thanks [@maitrungduc1410](https://github.com/maitrungduc1410)! - Resolve symlinks in `fs.realpathSync.native` / `fs.realpath.native` (`binding.realpath`) so Vite's dependency optimizer can follow `pnpm`'s `.pnpm` symlink layout, and remap registry-aliased WASM packages (`lightningcss-wasm`, `esbuild-wasm`, `@rollup/wasm-node`, `bcryptjs`) when `pnpm` reads back from its content-addressed store so subsequent `pnpm` commands no longer fail with `ERR_PNPM_UNEXPECTED_PKG_CONTENT_IN_STORE` (GitHub issue [#17](https://github.com/maitrungduc1410/vivari/issues/17)).
+
 ## 1.1.3
 
 ### Patch Changes
