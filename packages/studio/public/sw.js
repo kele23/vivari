@@ -34,10 +34,25 @@ const WILDCARD_MODE = WILDCARD_PORT > 0;
 // server `listen`, i.e. right before a preview loads).
 const kernelHostIds = new Set();
 
+// Which kernel a preview FRAME belongs to, by the frame's client id. More than one
+// Vivari kernel can live on one origin — two Studio tabs, each with its own VM and dev
+// server, and both dev servers bind the SAME in-VM port (5173 in the common case), so
+// the port in a preview URL no longer identifies anything. A frame does: the navigation
+// that creates it was started by a specific window (event.clientId, the Studio tab) and
+// every later subresource of the frame names the frame, whose id that navigation
+// reported as its resultingClientId (see servePreview). In-memory: a revived SW loses
+// it and falls back to the single-kernel heuristic until each tab re-announces.
+const frameKernel = new Map();
+
+// keep-prefix ports per kernel host, because two tabs may disagree about the same port
+// (one template keeps the /preview/<port>/ prefix, the other strips it). The persisted
+// `keepPrefixPorts` set stays as the last-writer-wins fallback for a revived SW.
+const keepPrefixByClient = new Map();
+
 // Mode B (separate preview origin): a persistent MessagePort to the IDE, handed
 // to us (via the hidden __vv-bridge.html client) on `vv-connect`. When set, we
-// route preview HTTP + ws/SSE over it instead of `findKernelClient()` (which
-// only sees same-origin windows and so can't reach a cross-origin IDE). Lost
+// route preview HTTP + ws/SSE over it instead of the same-origin client
+// heuristic (which only sees same-origin windows and can't reach a cross-origin IDE). Lost
 // when the SW is evicted → re-established via a `vv-need-connect` handshake.
 let kernelPort = null;
 
@@ -96,8 +111,9 @@ async function loadDevtoolsEnabled() {
 // Persist + apply the keep-prefix port set (see setKeepPrefixPorts). `waitUntil`
 // is passed for `ExtendableEvent`-sourced calls (the global message listener);
 // MessagePort-sourced calls (mode B) fire-and-forget the persistence promise.
-function applyKeepPrefix(ports, waitUntil) {
+function applyKeepPrefix(ports, waitUntil, clientId) {
   keepPrefixPorts = new Set(ports.map((p) => p | 0));
+  if (clientId) keepPrefixByClient.set(clientId, keepPrefixPorts);
   const persist = (async () => {
     try {
       const cache = await caches.open(KEEP_PREFIX_CACHE);
@@ -107,6 +123,14 @@ function applyKeepPrefix(ports, waitUntil) {
     }
   })();
   if (waitUntil) waitUntil(persist);
+}
+
+// Does THIS kernel serve `port` under the preview prefix? Per-kernel when the request
+// named a kernel we have an announcement for; the persisted set otherwise.
+function keepPrefixFor(clientId, port) {
+  const perClient = clientId ? keepPrefixByClient.get(clientId) : null;
+  if (perClient) return perClient.has(port);
+  return !!(keepPrefixPorts && keepPrefixPorts.has(port));
 }
 
 // Persist + apply the DevTools-injection toggle (see loadDevtoolsEnabled).
@@ -211,26 +235,34 @@ function learnIsolationPolicy(hostUrl, declared, waitUntil) {
 
 // dir:'in' (kernel → tabs): broadcast an inbound ws/SSE frame to every TOP-LEVEL
 // preview client (in-app iframes get theirs via parent.postMessage, no dupes).
-function broadcastInboundFrame(d) {
+function broadcastInboundFrame(d, sourceClientId) {
   return self.clients.matchAll({ type: "window" }).then((cs) => {
     for (const c of cs) {
       // Mode C: this origin serves a single port, so every top-level client here
       // IS a preview (no /preview/ marker in the URL). Mode A/B: match the marker.
-      if (c.frameType === "top-level" && (WILDCARD_MODE || c.url.includes(PREVIEW_MARKER))) {
-        c.postMessage(d);
-      }
+      if (!(c.frameType === "top-level" && (WILDCARD_MODE || c.url.includes(PREVIEW_MARKER))))
+        continue;
+      // ...and, when the kernel that produced the frame is known, only that kernel's
+      // own previews: another Studio tab on this origin has no business receiving them.
+      const owner = frameKernel.get(c.id);
+      if (sourceClientId && owner && owner !== sourceClientId) continue;
+      c.postMessage(d);
     }
   });
 }
 
-// dir:'out' (tab → kernel): forward an outbound ws/SSE frame to the kernel — over
-// the persistent port in mode B, else to the same-origin kernel-host client.
-function forwardOutboundFrame(d) {
+// dir:'out' (tab → kernel): forward an outbound ws/SSE frame to the kernel that served
+// this preview (see frameKernel) — over the persistent port in mode B, else to that
+// same-origin kernel-host client. The single-kernel heuristic is the fallback for a
+// frame whose owner is unknown (a revived SW has lost the map).
+function forwardOutboundFrame(d, sourceClientId) {
   if (kernelPort) {
     kernelPort.postMessage(d);
     return Promise.resolve();
   }
-  return findKernelClient().then((k) => {
+  return self.clients.matchAll({ type: "window", includeUncontrolled: true }).then((clients) => {
+    const ownerId = sourceClientId ? frameKernel.get(sourceClientId) : null;
+    const k = ownerId ? clients.find((c) => c.id === ownerId) : pickKernelClient(clients);
     if (k) k.postMessage(d);
   });
 }
@@ -249,7 +281,7 @@ function onKernelPortMessage(event) {
     return;
   }
   if ((d.type === "vv-ws" || d.type === "vv-sse") && d.dir === "in") {
-    broadcastInboundFrame(d);
+    broadcastInboundFrame(d, null);
   }
 }
 
@@ -278,7 +310,7 @@ self.addEventListener("message", (event) => {
     return;
   }
   if (d && d.type === "vv-keep-prefix-ports" && Array.isArray(d.ports)) {
-    applyKeepPrefix(d.ports, (p) => event.waitUntil(p));
+    applyKeepPrefix(d.ports, (p) => event.waitUntil(p), event.source && event.source.id);
     return;
   }
   // Toggle the in-preview DevTools backend injection (see loadDevtoolsEnabled).
@@ -296,21 +328,32 @@ self.addEventListener("message", (event) => {
   //   dir:'in'  (kernel → tabs): broadcast to every TOP-LEVEL preview client.
   if (d && (d.type === "vv-ws" || d.type === "vv-sse")) {
     if (d.dir === "out") {
-      event.waitUntil(forwardOutboundFrame(d));
+      event.waitUntil(forwardOutboundFrame(d, event.source && event.source.id));
     } else if (d.dir === "in") {
-      event.waitUntil(broadcastInboundFrame(d));
+      event.waitUntil(broadcastInboundFrame(d, event.source && event.source.id));
     }
     return;
   }
 });
 
+const isPreviewClient = (c) => c.url.includes(PREVIEW_MARKER);
+const isDevtoolsClient = (c) =>
+  c.url.includes("/devtools-host.html") || c.url.includes("/devtools/");
+const isBridgeClient = (c) =>
+  c.url.includes("/__vv-bridge") || c.url.includes("/__vv-preview-boot");
+// A window that can plausibly host a kernel: not a preview, not DevTools, not a bridge.
+const isKernelWindow = (c) => !isPreviewClient(c) && !isDevtoolsClient(c) && !isBridgeClient(c);
+
 // Choose how to reach the kernel for a preview request. Mode B routes over the
-// persistent port (`cross: true` → cross-origin response headers); mode A picks
-// the same-origin kernel-host window client. In mode B after an SW eviction the
-// port is gone: detect the bridge client, ask the IDE to re-hand a port, and wait
-// briefly for it before giving up. Does a single matchAll to stay cheap in mode A.
-async function resolveKernelSink() {
-  if (kernelPort) return { post: (m, t) => kernelPort.postMessage(m, t || []), cross: true };
+// persistent port (`cross: true` → cross-origin response headers); mode A picks the
+// same-origin kernel-host window client THAT THIS REQUEST BELONGS TO — a navigation
+// comes from the window that started it (the Studio tab), every later request of the
+// resulting frame from the frame itself (see frameKernel). In mode B after an SW
+// eviction the port is gone: detect the bridge client, ask the IDE to re-hand a port,
+// and wait briefly for it before giving up. One matchAll to stay cheap in mode A.
+async function resolveKernelSink(event) {
+  if (kernelPort)
+    return { post: (m, t) => kernelPort.postMessage(m, t || []), cross: true, clientId: null };
   const clients = await self.clients.matchAll({ type: "window", includeUncontrolled: true });
   // Match both `/__vv-bridge.html` and the Cloudflare clean-URL form `/__vv-bridge`.
   const bridge = clients.find((c) => c.url.includes("/__vv-bridge"));
@@ -320,11 +363,19 @@ async function resolveKernelSink() {
     for (let i = 0; i < 40 && !kernelPort; i++) {
       await new Promise((r) => setTimeout(r, 50));
     }
-    if (kernelPort) return { post: (m, t) => kernelPort.postMessage(m, t || []), cross: true };
+    if (kernelPort)
+      return { post: (m, t) => kernelPort.postMessage(m, t || []), cross: true, clientId: null };
     return null;
   }
-  const client = pickKernelClient(clients);
-  return client ? { post: (m, t) => client.postMessage(m, t || []), cross: false } : null;
+  // The kernel this request belongs to: the frame's owner if the navigation recorded
+  // one, else the window the request names — accepted only when it can host a kernel.
+  const requester = (event && (event.clientId || event.resultingClientId)) || "";
+  const ownerId = (requester && frameKernel.get(requester)) || requester;
+  const owner = ownerId ? clients.find((c) => c.id === ownerId && isKernelWindow(c)) : null;
+  const client = owner || pickKernelClient(clients);
+  return client
+    ? { post: (m, t) => client.postMessage(m, t || []), cross: false, clientId: client.id }
+    : null;
 }
 
 // The window that hosts the kernel — a non-preview, non-DevTools, non-bridge
@@ -339,21 +390,12 @@ async function resolveKernelSink() {
 // tab itself → nobody answers → "Preview timed out"). Returning null lets the
 // caller show the friendly "connecting…" page instead.
 function pickKernelClient(clients) {
-  const isPreview = (c) => c.url.includes(PREVIEW_MARKER);
-  const isDevtools = (c) => c.url.includes("/devtools-host.html") || c.url.includes("/devtools/");
-  const isBridge = (c) => c.url.includes("/__vv-bridge") || c.url.includes("/__vv-preview-boot");
-  const ok = (c) => !isPreview(c) && !isDevtools(c) && !isBridge(c);
   return (
-    clients.find((c) => kernelHostIds.has(c.id) && ok(c)) ||
-    clients.find((c) => c.frameType === "top-level" && ok(c)) ||
-    clients.find(ok) ||
+    clients.find((c) => kernelHostIds.has(c.id) && isKernelWindow(c)) ||
+    clients.find((c) => c.frameType === "top-level" && isKernelWindow(c)) ||
+    clients.find(isKernelWindow) ||
     null
   );
-}
-
-async function findKernelClient() {
-  const clients = await self.clients.matchAll({ type: "window", includeUncontrolled: true });
-  return pickKernelClient(clients);
 }
 
 // roadmap: Packaging Stage 2 — precache the role bundles. Every Process Worker
@@ -1095,13 +1137,10 @@ self.addEventListener("fetch", (event) => {
     const port = parseInt(slash === -1 ? rest : rest.slice(0, slash), 10);
     const stripped = (slash === -1 ? "/" : rest.slice(slash)) + url.search;
     const full = url.pathname + url.search;
-    // Keep-prefix ports serve UNDER /preview/<port>/ (see loadKeepPrefixPorts);
-    // everyone else gets the prefix stripped as before.
-    event.respondWith(
-      loadKeepPrefixPorts().then((keep) =>
-        handlePreview(event, port, keep.has(port) ? full : stripped, keep.has(port)),
-      ),
-    );
+    // Whether the prefix is kept is a per-KERNEL decision (see loadKeepPrefixPorts),
+    // and the kernel is only known once the request is routed — so hand both forms
+    // down and let servePreview pick after resolving the sink.
+    event.respondWith(handlePreview(event, port, { full, stripped }));
     return;
   }
 
@@ -1394,15 +1433,15 @@ async function handlePreview(event, port, path, keepPrefix) {
   return res;
 }
 
-async function servePreview(event, port, path, keepPrefix, served = {}) {
+async function servePreview(event, port, route, explicitKeepPrefix, served = {}) {
   if (!Number.isInteger(port)) {
     return new Response("Bad preview URL\n", { status: 400 });
   }
 
-  // Reach the kernel. Mode A: the same-origin kernel-host window client. Mode B:
-  // the persistent port to the (cross-origin) IDE, reviving it if the SW was
-  // evicted. `cross` tells us which CORP/COEP headers the response needs.
-  const sink = await resolveKernelSink();
+  // Reach the kernel. Mode A: the same-origin kernel-host window client this request
+  // belongs to. Mode B: the persistent port to the (cross-origin) IDE, reviving it if
+  // the SW was evicted. `cross` tells us which CORP/COEP headers the response needs.
+  const sink = await resolveKernelSink(event);
   if (sink) served.cross = !!sink.cross;
   if (!sink) {
     // A top-level preview tab (mode B "Open in new tab") whose kernel we can't
@@ -1420,6 +1459,25 @@ async function servePreview(event, port, path, keepPrefix, served = {}) {
       });
     }
     return new Response("Vivari kernel is not running\n", { status: 503 });
+  }
+
+  // A navigation names the frame it is about to create: remember which kernel served
+  // it, so every later subresource of that frame (which names the frame) comes back
+  // here. This is what keeps two Studio tabs' previews apart on one origin.
+  if (sink.clientId && event.request.mode === "navigate" && event.resultingClientId) {
+    frameKernel.set(event.resultingClientId, sink.clientId);
+  }
+
+  // Keep-prefix apps serve UNDER /preview/<port>/ (see loadKeepPrefixPorts); everyone
+  // else gets the prefix stripped. The set belongs to a KERNEL, and the request has
+  // just been routed to one — resolve it here, not in the fetch handler.
+  const autoPrefix = typeof route === "object" && route !== null;
+  let path = autoPrefix ? route.full : route;
+  let keepPrefix = autoPrefix ? false : !!explicitKeepPrefix;
+  if (autoPrefix) {
+    await loadKeepPrefixPorts();
+    keepPrefix = keepPrefixFor(sink.clientId, port);
+    if (!keepPrefix) path = route.stripped;
   }
 
   let body = "";
