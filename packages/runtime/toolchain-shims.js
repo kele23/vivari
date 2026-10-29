@@ -135,3 +135,151 @@ export function synthesizeRemappedPackument(sourceJson, targetJson, src) {
     versions,
   };
 }
+
+// Marker injected into pnpm's packageRequester once patched (idempotency + test check).
+export const PNPM_STORE_ALIAS_MARKER = "[Vivari] pnpm store alias remap";
+
+const _pnpmDriftWarned = new Set();
+function warnPnpmDrift(filename) {
+  if (_pnpmDriftWarned.has(filename)) return;
+  _pnpmDriftWarned.add(filename);
+  try {
+    console.warn(
+      "[Vivari] pnpm store-alias patch did NOT apply to " +
+        filename +
+        ": the fetchToStore block shape changed (version drift). Update " +
+        "maybePatchPnpmStoreAliases in packages/runtime/toolchain-shims.js.",
+    );
+  } catch {
+    /* console may be unavailable in some worker contexts */
+  }
+}
+
+/**
+ * Rewrite pnpm's `packageRequester` (`dist/pnpm.cjs`) at load time so packages
+ * substituted at the registry packument layer (`NATIVE_WASM_ALIASES` /
+ * `NATIVE_DROPIN_ALIASES`, e.g. `lightningcss` -> `lightningcss-wasm`) are
+ * recognized under their source name when read back from pnpm's content-addressed
+ * store (CAFS).
+ *
+ * Why: the Fetcher Worker rewrites the packument's `name` to the source package
+ * while keeping `dist.tarball` + `dist.integrity` pointing at the WASM drop-in's
+ * tarball. When pnpm extracts that tarball into CAFS, the tarball's inner
+ * `package.json` still carries the drop-in's name (`lightningcss-wasm`), so on
+ * any subsequent `pnpm install` / `pnpm add` against the warm store,
+ * `readPkgFromCafs` reports `pkgFilesIndex.name === "lightningcss-wasm"` while
+ * `opts.expectedPkg.name === "lightningcss"` — throwing
+ * `ERR_PNPM_UNEXPECTED_PKG_CONTENT_IN_STORE` and returning `bundledManifest`
+ * under the drop-in name. Remapping `pkgFilesIndex` and `manifest` in memory
+ * when `(expected, actual)` is a registered alias pair keeps the CAFS store
+ * content-addressed while making lockfile and store checks transparent.
+ *
+ * @param {string} source
+ * @param {string} filename
+ * @returns {string|null}
+ */
+export function maybePatchPnpmStoreAliases(source, filename) {
+  if (typeof source !== "string" || source.length < 256) return null;
+  if (source.includes(PNPM_STORE_ALIAS_MARKER)) return null;
+  if (
+    typeof filename !== "string" ||
+    (!filename.endsWith("/pnpm.cjs") &&
+      !filename.endsWith("\\pnpm.cjs") &&
+      !filename.endsWith("/packageRequester.js") &&
+      !filename.endsWith("\\packageRequester.js"))
+  ) {
+    return null;
+  }
+
+  const lf = source.includes("\r\n") ? source.replace(/\r\n/g, "\n") : source;
+  const fetchHead = "    function fetchToStore(ctx, opts) {\n";
+  const cafsRead =
+    "            const { verified, pkgFilesIndex, manifest, requiresBuild } = await ctx.readPkgFromCafs(filesIndexFile, opts.fetchRawManifest);\n";
+  const remoteResolve =
+    "            bundledManifest: fetchedPackage.manifest == null ? fetchedPackage.manifest : normalizeBundledManifest(fetchedPackage.manifest)\n";
+
+  if (!lf.includes(fetchHead) || !lf.includes(cafsRead) || !lf.includes(remoteResolve)) {
+    warnPnpmDrift(filename);
+    return null;
+  }
+
+  const header =
+    `// ${PNPM_STORE_ALIAS_MARKER}\n` +
+    `const __VV_WASM_ALIASES = ${JSON.stringify(NATIVE_WASM_ALIASES)};\n` +
+    `const __VV_DROPIN_ALIASES = ${JSON.stringify(NATIVE_DROPIN_ALIASES)};\n` +
+    `function __vvRemapPnpmAlias(opts, pkgFilesIndex, manifest) {\n` +
+    `  const exp = (opts && opts.expectedPkg && opts.expectedPkg.name != null) ? opts.expectedPkg : (opts && opts.pkg);\n` +
+    `  const src = exp && exp.name;\n` +
+    `  if (typeof src !== "string" || !src) return manifest;\n` +
+    `  const wasmDst = Object.hasOwn(__VV_WASM_ALIASES, src) ? __VV_WASM_ALIASES[src] : null;\n` +
+    `  const dropinDst = Object.hasOwn(__VV_DROPIN_ALIASES, src) ? __VV_DROPIN_ALIASES[src] : null;\n` +
+    `  const dst = (typeof wasmDst === "string" ? wasmDst : null) || (typeof dropinDst === "string" ? dropinDst : null);\n` +
+    `  if (!dst) return manifest;\n` +
+    `  if (pkgFilesIndex && typeof pkgFilesIndex.name === "string" && pkgFilesIndex.name.toLowerCase() === dst.toLowerCase()) {\n` +
+    `    pkgFilesIndex.name = src;\n` +
+    `    if (dropinDst && exp.version) pkgFilesIndex.version = exp.version;\n` +
+    `  }\n` +
+    `  if (manifest && typeof manifest.name === "string" && manifest.name.toLowerCase() === dst.toLowerCase()) {\n` +
+    `    manifest.name = src;\n` +
+    `    if (dropinDst && exp.version) manifest.version = exp.version;\n` +
+    `  }\n` +
+    `  return manifest;\n` +
+    `}\n`;
+
+  const lazyRead1 = "              bundledManifest: await readBundledManifest(manifestPath)\n";
+  const lazyRead2 = '            bundledManifest: await readBundledManifest(files.filesIndex["package.json"])\n';
+
+  let out =
+    header +
+    lf
+      .replace(
+        cafsRead,
+        cafsRead + "            __vvRemapPnpmAlias(opts, pkgFilesIndex, manifest);\n",
+      )
+      .replace(
+        remoteResolve,
+        "            bundledManifest: fetchedPackage.manifest == null ? fetchedPackage.manifest : normalizeBundledManifest(__vvRemapPnpmAlias(opts, null, fetchedPackage.manifest))\n",
+      )
+      .replace(
+        lazyRead1,
+        "              bundledManifest: __vvRemapPnpmAlias(opts, null, await readBundledManifest(manifestPath))\n",
+      )
+      .replace(
+        lazyRead2,
+        '            bundledManifest: __vvRemapPnpmAlias(opts, null, await readBundledManifest(files.filesIndex["package.json"]))\n',
+      );
+
+  const topParentsOld =
+    "    async function getTopParents(pkgAliases, modulesDir) {\n" +
+    "      const pkgs = await Promise.all(pkgAliases.map((alias) => path_1.default.join(modulesDir, alias)).map(read_package_json_1.safeReadPackageJsonFromDir));\n" +
+    "      return (0, zipWith_1.default)((manifest, alias) => {\n" +
+    "        if (!manifest)\n" +
+    "          return null;\n" +
+    "        return {\n" +
+    "          alias,\n" +
+    "          name: manifest.name,\n" +
+    "          version: manifest.version\n" +
+    "        };\n" +
+    "      }, pkgs, pkgAliases).filter(Boolean);\n" +
+    "    }";
+  if (out.includes(topParentsOld)) {
+    const topParentsNew =
+      "    async function getTopParents(pkgAliases, modulesDir) {\n" +
+      "      const pkgs = await Promise.all(pkgAliases.map((alias) => path_1.default.join(modulesDir, alias)).map(read_package_json_1.safeReadPackageJsonFromDir));\n" +
+      "      return (0, zipWith_1.default)((manifest, alias) => {\n" +
+      "        if (!manifest)\n" +
+      "          return null;\n" +
+      "        const __vvDst = (Object.hasOwn(__VV_WASM_ALIASES, alias) && __VV_WASM_ALIASES[alias]) || (Object.hasOwn(__VV_DROPIN_ALIASES, alias) && __VV_DROPIN_ALIASES[alias]) || null;\n" +
+      "        const __vvName = (typeof __vvDst === 'string' && typeof manifest.name === 'string' && manifest.name.toLowerCase() === __vvDst.toLowerCase()) ? alias : manifest.name;\n" +
+      "        return {\n" +
+      "          alias,\n" +
+      "          name: __vvName,\n" +
+      "          version: manifest.version\n" +
+      "        };\n" +
+      "      }, pkgs, pkgAliases).filter(Boolean);\n" +
+      "    }";
+    out = out.replace(topParentsOld, topParentsNew);
+  }
+
+  return out;
+}

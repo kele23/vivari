@@ -1199,6 +1199,12 @@ function baseProcEnv(dir) {
     // config from env.)
     npm_config_package_import_method: "hardlink",
     npm_config_store_dir: "/home/user/.local/share/pnpm/store",
+    // Registry packument aliasing serves wasm drop-in tarballs (e.g.
+    // lightningcss-wasm) under the native package name (lightningcss). Alongside
+    // the load-time store-alias remap in toolchain-shims.js, disable pnpm's
+    // strict store name/version throw so even a corepack-downloaded pnpm release
+    // never aborts with ERR_PNPM_UNEXPECTED_PKG_CONTENT_IN_STORE.
+    npm_config_strict_store_pkg_content_check: "false",
     XDG_DATA_HOME: "/home/user/.local/share",
     XDG_CACHE_HOME: "/home/user/.cache",
     XDG_STATE_HOME: "/home/user/.local/state",

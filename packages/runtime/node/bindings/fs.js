@@ -95,6 +95,7 @@ export function createFsBinding({ sys: rawSys, process }) {
   // Rust VFS only speaks absolute paths, so do it here (per-worker, honouring a
   // live process.chdir). fd-based ops carry no path and pass straight through.
   const R = (p) => {
+    if (p instanceof Uint8Array) p = textDecoder.decode(p);
     if (typeof p !== "string" || p.startsWith("/")) return p;
     const cwd = process.cwd() || "/";
     return (cwd.endsWith("/") ? cwd : cwd + "/") + p;
@@ -592,13 +593,74 @@ export function createFsBinding({ sys: rawSys, process }) {
     },
     readlink(path, encoding, ...rest) {
       const req = findReq(rest);
-      return dispatch(req, () => sys.readlink(path));
+      return dispatch(req, () => {
+        const res = sys.readlink(path);
+        if (!encoding || encoding === "utf8" || encoding === "utf-8") return res;
+        const buf = Buffer.from(res);
+        return encoding === "buffer" ? buf : buf.toString(encoding);
+      });
     },
     realpath(path, encoding, ...rest) {
       const req = findReq(rest);
-      // VFS paths are already absolute & normalized; symlink resolution for the
-      // default realpath is done by fs.js itself via lstat/readlink.
-      return dispatch(req, () => path);
+      // Resolve `.`, `..` and symlinks across the VFS. While fs.realpathSync
+      // walks the path in JS via lstat/readlink, fs.realpathSync.native and
+      // fs.realpath.native call binding.realpath directly — and Vite on Linux
+      // binds safeRealpathSync to fs.realpathSync.native, which is how it
+      // resolves pnpm's node_modules/<pkg> -> .pnpm/<pkg>@<ver>/node_modules/<pkg>
+      // symlinks during dependency pre-bundling.
+      return dispatch(req, () => {
+        const absInput = R(path);
+        const abs = typeof absInput === "string" ? absInput : absInput.toString();
+        const mustBeDir = abs.length > 1 && abs.endsWith("/");
+        const stack = [];
+        let lastKind = "dir";
+        const notDir = () => {
+          const e = new Error("ENOTDIR");
+          e.code = "ENOTDIR";
+          throw e;
+        };
+        const walk = (comps, depth) => {
+          // Matches SYMLINK_MAX_DEPTH (40) in packages/vfs/src/lib.rs.
+          if (depth > 40) {
+            const e = new Error("ELOOP");
+            e.code = "ELOOP";
+            throw e;
+          }
+          for (let i = 0; i < comps.length; i++) {
+            const comp = comps[i];
+            if (!comp) continue;
+            if (lastKind !== "dir") notDir();
+            if (comp === ".") continue;
+            if (comp === "..") {
+              stack.pop();
+              lastKind = "dir";
+              continue;
+            }
+            const cur = "/" + [...stack, comp].join("/");
+            const st = sys.lstat(cur);
+            if (st.kind === "symlink") {
+              const target = sys.readlink(cur);
+              const targetMustBeDir = target.length > 1 && target.endsWith("/");
+              if (target.startsWith("/")) {
+                stack.length = 0;
+                lastKind = "dir";
+              }
+              walk(target.split("/"), depth + 1);
+              if (targetMustBeDir && lastKind !== "dir") notDir();
+            } else {
+              stack.push(comp);
+              lastKind = st.kind;
+            }
+          }
+        };
+        sys.lstat("/");
+        walk(abs.split("/"), 0);
+        if (mustBeDir && lastKind !== "dir") notDir();
+        const resolved = "/" + stack.join("/");
+        if (!encoding || encoding === "utf8" || encoding === "utf-8") return resolved;
+        const buf = Buffer.from(resolved);
+        return encoding === "buffer" ? buf : buf.toString(encoding);
+      });
     },
     copyFile(src, dest, mode, ...rest) {
       const req = findReq(rest);

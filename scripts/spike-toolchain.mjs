@@ -20,6 +20,8 @@ import { maybePatchEsbuildInProcess } from "../packages/runtime/esbuild-inproc-p
 import {
   NATIVE_WASM_ALIASES,
   NATIVE_DROPIN_ALIASES,
+  PNPM_STORE_ALIAS_MARKER,
+  maybePatchPnpmStoreAliases,
   synthesizeRemappedPackument,
 } from "../packages/runtime/toolchain-shims.js";
 import {
@@ -271,6 +273,267 @@ stubNodeGyp(mockKernel, "/npm");
 ok(
   vfsMap.get("/npm" + ARBORIST_BUILD_IDEAL_TREE) === patchedArborist,
   "arborist: stubNodeGyp patches build-ideal-tree.js in the VFS",
+);
+
+// --- 8. pnpm store-alias remap (maybePatchPnpmStoreAliases) ------------------
+const PNPM_SNIPPET = `// pnpm packageRequester fixture
+    function fetchToStore(ctx, opts) {
+      if (!opts.pkg.name) {
+        opts.fetchRawManifest = true;
+      }
+      if (opts.fetchRawManifest && !result2.fetchRawManifest) {
+        result2.fetching = removeKeyOnFail(result2.fetching.then(async ({ files }) => {
+          if (files.unprocessed) {
+            return {
+              files,
+              bundledManifest: await readBundledManifest(manifestPath)
+            };
+          }
+          return {
+            files,
+            bundledManifest: await readBundledManifest(files.filesIndex["package.json"])
+          };
+        }));
+      }
+      const getLazyFetching = () => result2.fetching;
+      async function doFetchToStore(filesIndexFile, fetching, target) {
+        try {
+          if (!opts.force) {
+            const { verified, pkgFilesIndex, manifest, requiresBuild } = await ctx.readPkgFromCafs(filesIndexFile, opts.fetchRawManifest);
+            if (verified) {
+              if (pkgFilesIndex.name != null && opts.expectedPkg?.name != null && pkgFilesIndex.name.toLowerCase() !== opts.expectedPkg.name.toLowerCase() || pkgFilesIndex.version != null && opts.expectedPkg?.version != null && pkgFilesIndex.version !== opts.expectedPkg.version) {
+                if (ctx.strictStorePkgContentCheck ?? true) {
+                  const err = new Error("Package name mismatch");
+                  err.code = "ERR_PNPM_UNEXPECTED_PKG_CONTENT_IN_STORE";
+                  throw err;
+                }
+                ctx.onWarn("Package name mismatch");
+              }
+              fetching.resolve({
+                files: { resolvedFrom: "store" },
+                bundledManifest: manifest == null ? manifest : normalizeBundledManifest(manifest)
+              });
+              return;
+            }
+          }
+          const fetchedPackage = await ctx.fetch();
+          fetching.resolve({
+            files: { resolvedFrom: "remote" },
+            bundledManifest: fetchedPackage.manifest == null ? fetchedPackage.manifest : normalizeBundledManifest(fetchedPackage.manifest)
+          });
+        } catch (err) {
+          fetching.reject(err);
+        }
+      }
+      return { doFetchToStore };
+    }
+    async function getTopParents(pkgAliases, modulesDir) {
+      const pkgs = await Promise.all(pkgAliases.map((alias) => path_1.default.join(modulesDir, alias)).map(read_package_json_1.safeReadPackageJsonFromDir));
+      return (0, zipWith_1.default)((manifest, alias) => {
+        if (!manifest)
+          return null;
+        return {
+          alias,
+          name: manifest.name,
+          version: manifest.version
+        };
+      }, pkgs, pkgAliases).filter(Boolean);
+    }
+`;
+
+const PNPM_FILE = "/usr/lib/node_modules/pnpm/dist/pnpm.cjs";
+const patchedPnpm = maybePatchPnpmStoreAliases(PNPM_SNIPPET, PNPM_FILE);
+ok(patchedPnpm != null, "pnpm-alias: maybePatchPnpmStoreAliases rewrites pnpm.cjs");
+ok(patchedPnpm != null && patchedPnpm.includes(PNPM_STORE_ALIAS_MARKER), "pnpm-alias: rewrite carries marker");
+ok(
+  patchedPnpm != null && (patchedPnpm.match(/__vvRemapPnpmAlias\(/g) || []).length === 5,
+  "pnpm-alias: patches all 4 fetchToStore sites + helper declaration",
+);
+ok(
+  maybePatchPnpmStoreAliases(PNPM_SNIPPET.replace(/\n/g, "\r\n"), PNPM_FILE) === patchedPnpm,
+  "pnpm-alias: CRLF source normalizes and patches identically",
+);
+ok(maybePatchPnpmStoreAliases(patchedPnpm, PNPM_FILE) === null, "pnpm-alias: already-patched source is a no-op");
+ok(maybePatchPnpmStoreAliases(PNPM_SNIPPET, "/app/other.js") === null, "pnpm-alias: non-pnpm filename is a no-op");
+
+let pnpmDriftWarned = false;
+const origPnpmWarn = console.warn;
+console.warn = (...a) => {
+  if (String(a[0]).includes("pnpm store-alias patch did NOT apply")) pnpmDriftWarned = true;
+};
+ok(
+  maybePatchPnpmStoreAliases("// unrecognised pnpm bundle\n".repeat(20), PNPM_FILE) === null,
+  "pnpm-alias: drifted pnpm bundle returns null",
+);
+ok(pnpmDriftWarned, "pnpm-alias: drifted pnpm bundle warns loudly");
+console.warn = origPnpmWarn;
+
+// Functional execution of the patched fetchToStore against warm CAFS entries.
+const makePnpmHarness = new Function(`
+  const result2 = { fetchRawManifest: true };
+  const removeKeyOnFail = (p) => p;
+  const readBundledManifest = async (m) => m;
+  const normalizeBundledManifest = (m) => ({ ...m });
+  const path_1 = { default: { join: (a, b) => a + "/" + b } };
+  const read_package_json_1 = { safeReadPackageJsonFromDir: async (p) => globalThis.__mockManifests[p] };
+  const zipWith_1 = { default: (fn, a, b) => a.map((x, i) => fn(x, b[i])) };
+  ${patchedPnpm}
+  return { fetchToStore, getTopParents };
+`);
+const { fetchToStore: patchedFetchToStore, getTopParents: patchedGetTopParents } = makePnpmHarness();
+
+async function runDoFetch(ctx, opts) {
+  let resolved = null;
+  let rejected = null;
+  const { doFetchToStore } = patchedFetchToStore(ctx, opts);
+  await doFetchToStore(
+    "/store/idx.json",
+    {
+      resolve: (v) => { resolved = v; },
+      reject: (e) => { rejected = e; },
+    },
+    "/store/target",
+  );
+  if (rejected) throw rejected;
+  return resolved;
+}
+
+// 8a. Lockstep alias (lightningcss -> lightningcss-wasm) in warm store: no error, no warn, remapped name.
+let pnpmWarnCount = 0;
+const warmLightning = await runDoFetch(
+  {
+    strictStorePkgContentCheck: true,
+    onWarn: () => { pnpmWarnCount++; },
+    readPkgFromCafs: async () => ({
+      verified: true,
+      pkgFilesIndex: { name: "lightningcss-wasm", version: "1.33.0" },
+      manifest: { name: "lightningcss-wasm", version: "1.33.0" },
+      requiresBuild: false,
+    }),
+  },
+  {
+    pkg: { id: "lightningcss@1.33.0", resolution: {} },
+    expectedPkg: { name: "lightningcss", version: "1.33.0" },
+  },
+);
+ok(
+  warmLightning && warmLightning.bundledManifest && warmLightning.bundledManifest.name === "lightningcss" && pnpmWarnCount === 0,
+  "pnpm-alias: warm store lightningcss-wasm remaps to lightningcss with 0 warnings",
+);
+
+// 8b. Non-lockstep drop-in (bcrypt@6.0.0 -> bcryptjs@3.0.3) in warm store: remaps name AND version.
+const warmBcrypt = await runDoFetch(
+  {
+    strictStorePkgContentCheck: true,
+    onWarn: () => { pnpmWarnCount++; },
+    readPkgFromCafs: async () => ({
+      verified: true,
+      pkgFilesIndex: { name: "bcryptjs", version: "3.0.3" },
+      manifest: { name: "bcryptjs", version: "3.0.3" },
+      requiresBuild: false,
+    }),
+  },
+  {
+    pkg: { id: "bcrypt@6.0.0", resolution: {} },
+    expectedPkg: { name: "bcrypt", version: "6.0.0" },
+  },
+);
+ok(
+  warmBcrypt &&
+    warmBcrypt.bundledManifest &&
+    warmBcrypt.bundledManifest.name === "bcrypt" &&
+    warmBcrypt.bundledManifest.version === "6.0.0",
+  "pnpm-alias: warm store bcryptjs@3.0.3 remaps to bcrypt@6.0.0",
+);
+
+// 8c. Direct install of lightningcss-wasm still matches itself.
+const directWasm = await runDoFetch(
+  {
+    strictStorePkgContentCheck: true,
+    onWarn: () => { pnpmWarnCount++; },
+    readPkgFromCafs: async () => ({
+      verified: true,
+      pkgFilesIndex: { name: "lightningcss-wasm", version: "1.33.0" },
+      manifest: { name: "lightningcss-wasm", version: "1.33.0" },
+      requiresBuild: false,
+    }),
+  },
+  {
+    pkg: { id: "lightningcss-wasm@1.33.0", resolution: {} },
+    expectedPkg: { name: "lightningcss-wasm", version: "1.33.0" },
+  },
+);
+ok(
+  directWasm && directWasm.bundledManifest && directWasm.bundledManifest.name === "lightningcss-wasm",
+  "pnpm-alias: direct lightningcss-wasm install stays lightningcss-wasm",
+);
+
+// 8d. Genuine mismatch (unrelated package in store) still throws ERR_PNPM_UNEXPECTED_PKG_CONTENT_IN_STORE.
+let genuineMismatchCode = null;
+try {
+  await runDoFetch(
+    {
+      strictStorePkgContentCheck: true,
+      onWarn: () => {},
+      readPkgFromCafs: async () => ({
+        verified: true,
+        pkgFilesIndex: { name: "wrong-pkg", version: "1.0.0" },
+        manifest: { name: "wrong-pkg", version: "1.0.0" },
+        requiresBuild: false,
+      }),
+    },
+    {
+      pkg: { id: "expected-pkg@1.0.0", resolution: {} },
+      expectedPkg: { name: "expected-pkg", version: "1.0.0" },
+    },
+  );
+} catch (err) {
+  genuineMismatchCode = err && err.code;
+}
+ok(
+  genuineMismatchCode === "ERR_PNPM_UNEXPECTED_PKG_CONTENT_IN_STORE",
+  "pnpm-alias: genuine store content mismatch still throws ERR_PNPM_UNEXPECTED_PKG_CONTENT_IN_STORE",
+);
+
+// 8e. getTopParents remaps an aliased direct dependency on disk back to its alias name,
+// and ignores Object.prototype keys like "toString".
+globalThis.__mockManifests = {
+  "/nm/lightningcss": { name: "lightningcss-wasm", version: "1.33.0" },
+  "/nm/vue": { name: "vue", version: "3.5.44" },
+  "/nm/toString": { name: "toString", version: "1.0.0" },
+};
+const topParents = await patchedGetTopParents(["lightningcss", "vue", "toString"], "/nm");
+delete globalThis.__mockManifests;
+ok(
+  Array.isArray(topParents) &&
+    topParents.length === 3 &&
+    topParents[0].alias === "lightningcss" &&
+    topParents[0].name === "lightningcss" &&
+    topParents[1].name === "vue" &&
+    topParents[2].name === "toString",
+  "pnpm-alias: getTopParents preserves source name for aliased direct dependencies and ignores prototype keys",
+);
+
+// 8f. Prototype property names (e.g. "toString") on expectedPkg do not throw in __vvRemapPnpmAlias.
+const protoPkg = await runDoFetch(
+  {
+    strictStorePkgContentCheck: true,
+    onWarn: () => { pnpmWarnCount++; },
+    readPkgFromCafs: async () => ({
+      verified: true,
+      pkgFilesIndex: { name: "toString", version: "1.0.0" },
+      manifest: { name: "toString", version: "1.0.0" },
+      requiresBuild: false,
+    }),
+  },
+  {
+    pkg: { id: "toString@1.0.0", resolution: {} },
+    expectedPkg: { name: "toString", version: "1.0.0" },
+  },
+);
+ok(
+  protoPkg && protoPkg.bundledManifest && protoPkg.bundledManifest.name === "toString" && pnpmWarnCount === 0,
+  "pnpm-alias: Object.prototype key (toString) is not treated as an alias",
 );
 
 console.log("\nRESULT: " + (failures === 0 ? "PASS — toolchain subsystem intact" : `FAIL — ${failures} check(s) failed`));

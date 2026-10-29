@@ -552,11 +552,13 @@ export default function (exports, require, module, process) {
         return ESUCCESS;
       }
 
-      function path_filestat_get(dirfd, _flags, pathPtr, pathLen, resultPtr) {
+      function path_filestat_get(dirfd, flags, pathPtr, pathLen, resultPtr) {
         const hostPath = resolveAt(dirfd, readString(pathPtr, pathLen));
         if (hostPath == null) return EBADF;
         try {
-          const st = fs.statSync(hostPath);
+          // WASI LOOKUPFLAGS_SYMLINK_FOLLOW is bit 0: when unset, lstat the
+          // link itself so callers inspecting symlinks see FILETYPE_SYMBOLIC_LINK.
+          const st = flags & 1 ? fs.statSync(hostPath) : fs.lstatSync(hostPath);
           writeFilestat(resultPtr, st, filetypeOf(st));
         } catch (err) {
           return errnoFor(err);

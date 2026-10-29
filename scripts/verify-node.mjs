@@ -478,11 +478,28 @@ fs.copyFileSync('/t/a2.txt', '/t/a3.txt');
 assert.strictEqual(fs.readFileSync('/t/a3.txt', 'utf8'), 'abcdef');
 assert.strictEqual(fs.realpathSync('/t/a3.txt'), '/t/a3.txt');
 
-// symlink / readlink / lstat (+ follow on read).
+// symlink / readlink / lstat (+ follow on read + realpathSync.native).
 fs.symlinkSync('/t/a3.txt', '/t/link');
 assert.strictEqual(fs.readlinkSync('/t/link'), '/t/a3.txt');
+assert.ok(Buffer.isBuffer(fs.readlinkSync('/t/link', 'buffer')));
 assert.ok(fs.lstatSync('/t/link').isSymbolicLink());
 assert.strictEqual(fs.readFileSync('/t/link', 'utf8'), 'abcdef');
+assert.strictEqual(fs.realpathSync('/t/link'), '/t/a3.txt');
+assert.strictEqual(fs.realpathSync.native('/t/link'), '/t/a3.txt');
+assert.strictEqual(fs.realpathSync.native(Buffer.from('/t/link')), '/t/a3.txt');
+assert.ok(Buffer.isBuffer(fs.realpathSync.native('/t/link', 'buffer')));
+assert.strictEqual(fs.realpathSync.native('/t/link', 'buffer').toString('utf8'), '/t/a3.txt');
+assert.throws(() => fs.realpathSync.native('/t/link/'), { code: 'ENOTDIR' });
+assert.throws(() => fs.realpathSync.native('/t/link/.'), { code: 'ENOTDIR' });
+// pnpm-style relative directory symlink (node_modules/<pkg> -> .pnpm/<pkg>@<ver>/node_modules/<pkg>).
+fs.mkdirSync('/t/nm/.pnpm/vue@3.5.0/node_modules/vue', { recursive: true });
+fs.writeFileSync('/t/nm/.pnpm/vue@3.5.0/node_modules/vue/package.json', '{"name":"vue"}');
+fs.symlinkSync('.pnpm/vue@3.5.0/node_modules/vue', '/t/nm/vue');
+assert.strictEqual(
+  fs.realpathSync.native('/t/nm/vue/package.json'),
+  '/t/nm/.pnpm/vue@3.5.0/node_modules/vue/package.json',
+);
+fs.rmSync('/t/nm', { recursive: true });
 
 // ftruncate.
 const tfd = fs.openSync('/t/a3.txt', 'r+');

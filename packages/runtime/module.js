@@ -9,6 +9,7 @@
 
 import { transpileEsm, transpileEsmLive, rewriteCjsDynamicImport } from "./esm.js";
 import { maybePatchEsbuildInProcess } from "./esbuild-inproc-patch.js";
+import { maybePatchPnpmStoreAliases } from "./toolchain-shims.js";
 import { maybeTranspileTypeScript } from "./typescript-transform.js";
 // The native-addon message. It is in builtins/ next to the rest of the
 // "impossible in a browser, here is what to use instead" catalogue, and that file
@@ -555,6 +556,9 @@ export function createModuleSystem({ fs, path, builtins, process, globals, nodeM
     // esbuild-inproc-patch.js).
     const esbPatched = maybePatchEsbuildInProcess(source, filename, fs, path);
     if (esbPatched != null) source = esbPatched;
+
+    const pnpmPatched = maybePatchPnpmStoreAliases(source, filename);
+    if (pnpmPatched != null) source = pnpmPatched;
 
     // Bun-style zero-config TypeScript/JSX: strip types + lower JSX synchronously
     // for `.ts`/`.tsx`/`.mts`/`.cts`/`.jsx` before the ESM pass sees the source.
