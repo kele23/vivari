@@ -87,6 +87,12 @@ export async function createOpfsPersistence({
   // the read-modify-write.
   const owned = new Map(); // path -> "w" (write/create) | "d" (delete)
   const MANIFEST_LOCK = "vv-vfs-manifest";
+  // Manifest entries NOT replayed into the VFS yet: the subtrees an embedder
+  // deferred at boot (see restore's `isDeferred`). They stay in `meta`, so the
+  // index merge below keeps writing them and a later hydrate() finds them.
+  const deferred = new Map(); // path -> entry
+  // Paths this kernel has replayed into the VFS (boot restore + hydrate).
+  const materialized = new Set();
 
   const parts = (p) => p.split("/").filter(Boolean);
 
@@ -410,11 +416,73 @@ export async function createOpfsPersistence({
     }
   }
 
-  // ---- boot restore --------------------------------------------------------
-  // Replay the manifest into the VFS. Returns the number of entries restored (0
-  // = nothing persisted yet). Runs BEFORE the FS worker serves any syscall, and
+  // ---- restore: boot skeleton + on-demand hydrate --------------------------
+  // The manifest is this origin's durable index of EVERY path (every project, every
+  // package-manager cache). Replaying all of it at boot made every tab pay for every
+  // project, including the ones it never opens. So the replay is split in two:
+  //
+  //   * restore() materializes what this tab needs regardless, and leaves the
+  //     subtrees the embedder deferred in `deferred` — still indexed in `meta`, so
+  //     writes, deletes and the cross-tab index merge keep working for them;
+  //   * hydrate() materializes one of those subtrees when its project is opened.
+  //
+  // Both share materialize(): the replay order and the per-entry error handling are
+  // the easy things to let drift apart.
+  async function materialize(entries, onProgress) {
+    // Recreate in a safe order: dirs (shallow → deep), then files, then symlinks
+    // (a symlink's target may live anywhere in the tree).
+    const order = { dir: 0, file: 1, symlink: 2 };
+    const sorted = [...entries].sort((a, b) => {
+      const ka = order[a[1].k] ?? 1;
+      const kb = order[b[1].k] ?? 1;
+      if (ka !== kb) return ka - kb;
+      return parts(a[0]).length - parts(b[0]).length; // shallower first
+    });
+
+    const total = sorted.length;
+    let n = 0;
+    if (typeof onProgress === "function") onProgress(0, total);
+    // Sequential replay. An earlier attempt to overlap the per-file OPFS reads
+    // with bounded concurrency stalled near the end of a large restore: opening
+    // many `createSyncAccessHandle`s at once runs into OPFS's exclusive-lock /
+    // handle-count limits and some acquisitions never settle, wedging boot. The
+    // durable speed-up for a big node_modules is the lockfile-keyed dependency
+    // cache (dep-cache.js), not parallelizing this per-file loop.
+    for (const [path, m] of sorted) {
+      try {
+        if (m.k === "dir") {
+          access.mkdirp(path);
+        } else if (m.k === "file") {
+          const slash = path.lastIndexOf("/");
+          if (slash > 0) access.mkdirp(path.slice(0, slash));
+          access.writeFile(path, await readBytes(path));
+        } else if (m.k === "symlink") {
+          const slash = path.lastIndexOf("/");
+          if (slash > 0) access.mkdirp(path.slice(0, slash));
+          access.symlink(m.t, path);
+        }
+        n++;
+        materialized.add(path);
+        // Report roughly every 5% (min every 200 entries) so a big node_modules
+        // restore shows a moving count instead of a long silent stall.
+        if (typeof onProgress === "function" && n % Math.max(200, Math.ceil(total / 20)) === 0)
+          onProgress(n, total);
+      } catch {
+        /* skip a corrupt entry, keep restoring the rest */
+      }
+    }
+    if (typeof onProgress === "function") onProgress(n, total);
+    return n;
+  }
+
+  // Replay the manifest into the VFS. Returns { restored, deferred } (0/0 when
+  // nothing was persisted yet). Runs BEFORE the FS worker serves any syscall and
   // calls the VFS directly (via `access`), so it never re-enters the queue.
-  async function restore(onProgress) {
+  // `options.isDeferred(path, entry)` names the entries to leave on OPFS at boot: a
+  // deferred project subtree takes every entry.
+  async function restore(onProgress, options = {}) {
+    const isDeferred =
+      typeof options.isDeferred === "function" ? options.isDeferred : () => false;
     // Read under the manifest lock, so a tab booting while another rewrites the index
     // waits for the write instead of racing it. Without the lock a read can land between
     // the copy fallback's truncate and write, and the sync access handle held while
@@ -423,9 +491,11 @@ export async function createOpfsPersistence({
     const index = await withManifestLock(readManifest);
     if (!index.ok) {
       console.warn("[opfs] the VFS index is unreadable; starting with an empty workspace");
-      return 0;
+      return { restored: 0, deferred: 0 };
     }
-    if (!index.entries || index.entries.size === 0) return 0; // first run on this origin
+    if (!index.entries || index.entries.size === 0) {
+      return { restored: 0, deferred: 0 }; // first run on this origin
+    }
     const arr = [...index.entries.entries()];
 
     // Drop anything `shouldPersist` now rejects. Older builds mirrored
@@ -435,8 +505,19 @@ export async function createOpfsPersistence({
     // on the next drain (writeManifest serializes `meta`).
     const keep = [];
     const drop = [];
-    for (const e of arr) (shouldPersist(e[0]) ? keep : drop).push(e);
+    const later = [];
+    for (const e of arr) {
+      if (!shouldPersist(e[0])) drop.push(e);
+      else if (isDeferred(e[0])) later.push(e);
+      else keep.push(e);
+    }
     for (const [path, m] of keep) meta.set(path, m);
+    // Deferred paths stay in the index this tab merges into — that is what lets a
+    // later hydrate() find them, and what stops a write elsewhere from dropping them.
+    for (const [path, m] of later) {
+      meta.set(path, m);
+      deferred.set(path, m);
+    }
     // Those paths are not persisted any more, so their index entries are dead weight
     // everywhere — record the deletion so the merge below drops them from the shared
     // index instead of leaving every other tab to rediscover them.
@@ -461,50 +542,45 @@ export async function createOpfsPersistence({
       })();
     }
 
-    // Recreate in a safe order: dirs (shallow → deep), then files, then symlinks
-    // (a symlink's target may live anywhere in the tree).
-    const order = { dir: 0, file: 1, symlink: 2 };
-    const sorted = [...keep].sort((a, b) => {
-      const ka = order[a[1].k] ?? 1;
-      const kb = order[b[1].k] ?? 1;
-      if (ka !== kb) return ka - kb;
-      return parts(a[0]).length - parts(b[0]).length; // shallower first
-    });
+    const restored = await materialize(keep, onProgress);
+    return { restored, deferred: later.length };
+  }
 
-    const total = sorted.length;
-    let n = 0;
-    if (typeof onProgress === "function") onProgress(0, total);
-    // Sequential replay. An earlier attempt to overlap the per-file OPFS reads
-    // with bounded concurrency stalled near the end of a large restore: opening
-    // many `createSyncAccessHandle`s at once runs into OPFS's exclusive-lock /
-    // handle-count limits and some acquisitions never settle, wedging boot. The
-    // durable speed-up for a big node_modules is the lockfile-keyed dependency
-    // cache (restore a single snapshot), not parallelizing this per-file loop.
-    for (const [path, m] of sorted) {
-      try {
-        if (m.k === "dir") {
-          access.mkdirp(path);
-        } else if (m.k === "file") {
-          const slash = path.lastIndexOf("/");
-          if (slash > 0) access.mkdirp(path.slice(0, slash));
-          access.writeFile(path, await readBytes(path));
-        } else if (m.k === "symlink") {
-          const slash = path.lastIndexOf("/");
-          if (slash > 0) access.mkdirp(path.slice(0, slash));
-          access.symlink(m.t, path);
-        }
-        n++;
-        // Report roughly every 5% (min every 200 entries) so a big node_modules
-        // restore shows a moving count instead of a long silent stall.
-        if (typeof onProgress === "function" && n % Math.max(200, Math.ceil(total / 20)) === 0)
-          onProgress(n, total);
-      } catch {
-        /* skip a corrupt entry, keep restoring the rest */
+  // Materialize the deferred entries under `roots` — a project root the user just
+  // opened — and forget them from the deferred set. Idempotent: a second call for
+  // the same root returns 0, because materialized paths are no longer deferred.
+  async function hydrate(roots, onProgress) {
+    const list = (Array.isArray(roots) ? roots : [])
+      .map((r) => String(r || "").replace(/\/+$/, ""))
+      .filter(Boolean);
+    if (!list.length) return 0;
+    const within = (p) => list.some((r) => p === r || p.startsWith(r + "/"));
+    // The deferred set is the manifest as this kernel read it at boot, and a project
+    // another tab created since then is only in the manifest on disk. Merge in the
+    // entries under the requested roots that this kernel has never seen, so opening
+    // a fresh cross-tab project does not need a reload first. Local changes that are
+    // still queued are skipped: re-reading the index must not resurrect a path this
+    // tab has already deleted or is in the middle of rewriting.
+    const index = await readManifest();
+    if (index.ok && index.entries) {
+      for (const [path, m] of index.entries) {
+        if (!within(path) || meta.has(path) || materialized.has(path)) continue;
+        if (owned.has(path) || pending.has(path) || pendingLow.has(path)) continue;
+        if (!shouldPersist(path)) continue;
+        meta.set(path, m);
+        deferred.set(path, m);
       }
     }
-    if (typeof onProgress === "function") onProgress(n, total);
+    const selected = [];
+    for (const [path, m] of deferred) if (within(path)) selected.push([path, m]);
+    if (!selected.length) return 0;
+    const n = await materialize(selected, onProgress);
+    // "Attempted" is what matters: an entry whose OPFS blob is gone (another tab
+    // deleted the project after this one booted) cannot be materialized, and a retry
+    // on the next open would re-read the same missing blob.
+    for (const [path] of selected) deferred.delete(path);
     return n;
   }
 
-  return { onWrite, onDelete, onRename, flush, restore };
+  return { onWrite, onDelete, onRename, flush, restore, hydrate };
 }
