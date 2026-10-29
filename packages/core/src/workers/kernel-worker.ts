@@ -1324,6 +1324,11 @@ let fsWorkerRef = null;
 let vfsCompression = true;
 // Optional network relay URL (BootOptions.netRelay), applied once the kernel exists.
 let netRelayUrl: string | null = null;
+// Project roots whose persisted subtrees the FS worker leaves on OPFS at boot
+// (BootOptions.deferRestoreRoots). The studio defers every project it knows about and
+// hydrates one when the user opens it (vv-restore-roots), so a tab carries the
+// projects it actually opened instead of every project on the origin.
+let deferredRestoreRoots: string[] = [];
 
 // A bound port isn't the same as a *serving* one: Vite 8 (rolldown) binds :port
 // a few times during startup (bind → close → rebind), so the first `listen`
@@ -1468,6 +1473,11 @@ async function boot() {
   // it's in force as early as possible (the FS worker queues it until the VFS is
   // constructed). No-op on wasm builds that predate set_compression.
   fsWorker.postMessage({ type: "fs-set-compression", on: vfsCompression });
+  // ...and the subtrees it must leave on OPFS until the embedder asks for one (see
+  // vv-restore-roots). Sent synchronously here, before the wasm boot: the FS worker
+  // keeps this one out of its message queue precisely because it has to be known
+  // before the restore starts.
+  fsWorker.postMessage({ type: "fs-defer-roots", roots: deferredRestoreRoots });
   let onKernelFsMessage = () => {};
   let fsFailed = (_err) => {};
   const fsReady = new Promise((resolve, reject) => {
@@ -2628,6 +2638,11 @@ self.onmessage = async (event) => {
     // Default on: only an explicit `compress: false` (BootOptions.compress) disables it.
     vfsCompression = m.compress !== false;
     netRelayUrl = typeof m.netRelay === "string" && m.netRelay ? m.netRelay : null;
+    // BootOptions.deferRestoreRoots: project roots whose persisted files stay on OPFS
+    // until the embedder hydrates one (vv-restore-roots).
+    deferredRestoreRoots = Array.isArray(m.deferRestoreRoots)
+      ? m.deferRestoreRoots.filter((r: unknown) => typeof r === "string" && r)
+      : [];
     // `error` (not just `log`) so the SDK's boot() has something to reject on —
     // otherwise a kernel that dies here never posts `ready` and the caller waits
     // out its whole timeout with no idea why.
@@ -2965,6 +2980,25 @@ self.onmessage = async (event) => {
     if (m.reqId != null) post("vv-reply", { reqId: m.reqId, ok: true });
     return;
   }
+  // Materialize the OPFS subtrees a project owns, after the embedder deferred them at
+  // boot (BootOptions.deferRestoreRoots). The FS worker holds the manifest entries and
+  // replays only the requested roots into the VFS, so the reply means those files are
+  // readable — the caller needs no separate wait.
+  if (m.type === "vv-restore-roots") {
+    const roots = Array.isArray(m.roots)
+      ? m.roots.filter((r: unknown) => typeof r === "string" && r)
+      : [];
+    (async () => {
+      try {
+        const count = kernelFsRef ? await kernelFsRef.fs.restoreRoots(roots) : 0;
+        post("vv-reply", { reqId: m.reqId, ok: true, count });
+      } catch (err) {
+        post("vv-reply", { reqId: m.reqId, ok: false, error: errMsg(err) });
+      }
+    })();
+    return;
+  }
+
   // Ensure a reopened project's node_modules is present. It's no longer mirrored
   // file-by-file (fs-worker shouldPersist), so on reopen it's restored from the
   // dependency-cache snapshot (one blob) instead — no re-install. No-op if deps

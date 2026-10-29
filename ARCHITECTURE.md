@@ -247,7 +247,11 @@ only wired when `VV_DEBUG` is set, so non-debug runs never allocate it.
 - **Persistence**: the VFS is mirrored to the **Origin Private File System (OPFS)**
   by `opfs-persistence.js` (write-behind). OPFS sync access handles only exist in a
   Worker — hence this lives in the FS worker. On boot it restores the manifest into
-  the VFS **before** serving any syscall. Use `?reset` on the demo URL to wipe it.
+  the VFS **before** serving any syscall, **scoped**: `BootOptions.deferRestoreRoots`
+  names project roots whose entries stay in the mirror (indexed, not replayed), and the
+  `vv-restore-roots` request replays one of them when the embedder actually opens that
+  project — so a tab carries the projects it opened, not every project on the origin.
+  Use `?reset` on the demo URL to wipe it.
   Volatile/re-seeded paths are excluded (`fs-worker.js` `IGNORE`: `/bin /tmp /proc
   /dev /etc /usr /var/cache`). The package-manager caches deliberately live in a
   PERSISTED location (`/home/user/.cache` for npm/yarn/corepack, `/home/user/.local/
