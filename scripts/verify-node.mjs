@@ -2670,9 +2670,12 @@ fs.writeFileSync('/stall/done.txt', String(n));
       `writing ${writes} files — reported, and correctly NOT called dead`);
 
     // And the inverse: a process that produces output must NOT be reported.
+    // Anchor with an initial write on entry (just like busy.js above) so the
+    // 300ms threshold measures the running process rather than worker boot time.
     kernel.writeFile(
       "/stall/chatty.js",
       `let n = 0;
+process.stdout.write('tick 0\\n');
 const t = setInterval(() => { process.stdout.write('tick ' + (++n) + '\\n'); if (n > 25) clearInterval(t); }, 60);
 `,
     );

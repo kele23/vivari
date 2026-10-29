@@ -118,15 +118,21 @@ const vm = JSON.parse(await runVm("dump.js"));
 // and moves with every Node patch release (22.23.3 took 3.5.7 to 3.5.8). The VM
 // links no OpenSSL, so its table pins one; the release line is what a caller can
 // branch on, and the patch is compared away.
+//
+// BROTLI_DECODER_ERROR_FORMAT_BLOCK_SWITCH (-17) landed in Node 22 when its
+// bundled brotli was bumped after 22.23.3. The VM defines it so current Node 22
+// runners see the complete table; a slightly older 22.x host that predates the
+// brotli bump is excused from missing that one entry.
 const SAME = { OPENSSL_VERSION_NUMBER: (a, b) => a >>> 20 === b >>> 20 };
 const same = (k, a, b) => (SAME[k] && typeof a === "number" && typeof b === "number" ? SAME[k](a, b) : a === b);
+const PATCH_ADDED = { BROTLI_DECODER_ERROR_FORMAT_BLOCK_SWITCH: -17 };
 
 console.log("constant tables, against the host:\n");
 for (const label of Object.keys(host)) {
   const H = host[label];
   const V = vm[label] || {};
   const missing = Object.keys(H).filter((k) => !(k in V));
-  const extra = Object.keys(V).filter((k) => !(k in H));
+  const extra = Object.keys(V).filter((k) => !(k in H) && !(k in PATCH_ADDED && V[k] === PATCH_ADDED[k]));
   const differ = Object.keys(H).filter((k) => k in V && !same(k, V[k], H[k]));
   const clean = !missing.length && !extra.length && !differ.length;
   ok(clean, `${label} — ${Object.keys(H).length} names, values included`);
