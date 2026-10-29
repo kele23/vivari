@@ -1189,22 +1189,13 @@ function baseProcEnv(dir) {
     // Real yarn likewise needs a writable cache; persisted (see npm_config_cache)
     // so yarn's tarball cache is reused across projects/reloads.
     YARN_CACHE_FOLDER: "/home/user/.cache/yarn",
-    // Real pnpm: use its default HARD-LINK import method so node_modules entries
-    // share the store's inode instead of duplicating every package's bytes in the
-    // VFS's Wasm RAM (the store + a full copy per project was the biggest single
-    // memory sink). The VFS now supports link(2) (see OP_LINK); on a wasm build
-    // that predates it, the runtime's fs.link transparently falls back to a copy,
-    // so this is safe either way. The content-addressed store is persisted so it
-    // is shared across projects/reloads too. (npm_config_* is how pnpm reads
-    // config from env.)
-    npm_config_package_import_method: "hardlink",
-    npm_config_store_dir: "/home/user/.local/share/pnpm/store",
-    // Registry packument aliasing serves wasm drop-in tarballs (e.g.
-    // lightningcss-wasm) under the native package name (lightningcss). Alongside
-    // the load-time store-alias remap in toolchain-shims.js, disable pnpm's
-    // strict store name/version throw so even a corepack-downloaded pnpm release
-    // never aborts with ERR_PNPM_UNEXPECTED_PKG_CONTENT_IN_STORE.
-    npm_config_strict_store_pkg_content_check: "false",
+    // NOT here: pnpm's own config — the store dir, the hard-link import method, and
+    // the strict store-content check that the registry packument aliasing needs
+    // (wasm drop-in tarballs, e.g. lightningcss-wasm served as lightningcss, alongside
+    // the load-time remap in toolchain-shims.js). Those are npm_config_* names, which
+    // npm 12 rejects as unknown env config — and npm is the package manager the
+    // projects use. The pnpm shim sets them for its own process only
+    // (load-real-pnpm.js), which is the one place they belong.
     XDG_DATA_HOME: "/home/user/.local/share",
     XDG_CACHE_HOME: "/home/user/.cache",
     XDG_STATE_HOME: "/home/user/.local/state",

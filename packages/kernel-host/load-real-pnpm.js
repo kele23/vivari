@@ -19,11 +19,27 @@ export const PNPM_VFS_ROOT = "/usr/lib/node_modules/pnpm";
 // Thin shims on PATH. `node /bin/pnpm.js <args>` loads the real entry
 // (bin/pnpm.cjs → dist/pnpm.cjs), which reads process.argv exactly like the
 // spike's /run-pnpm.js wrapper proved. `pnpx` is pnpm's `dlx` alias.
+//
+// pnpm's config travels in npm_config_* env vars, and those names are npm's too: npm
+// 12 warns "Unknown env config" — and a future major turns that into an error — for
+// every process that sees them, so they are set HERE, in pnpm's own process, instead of
+// in the base process environment the kernel hands to every command (kernel-worker.ts).
+// HARD-LINK import method: node_modules entries share the store's inode instead of
+// duplicating every package's bytes in the VFS's Wasm RAM. The VFS supports link(2) (see
+// OP_LINK); on a wasm build that predates it, fs.link falls back to a copy. The
+// content-addressed store is persisted, so it is shared across projects/reloads.
+const PNPM_ENV = `process.env.npm_config_package_import_method ||= "hardlink";
+process.env.npm_config_store_dir ||= "/home/user/.local/share/pnpm/store";
+// Required by the packument-alias rewrite (toolchain-shims.js): pnpm extracts the
+// drop-in's tarball into CAFS under the source name, so a later install reading it back
+// must not abort with ERR_PNPM_UNEXPECTED_PKG_CONTENT_IN_STORE.
+process.env.npm_config_strict_store_pkg_content_check = "false";
+`;
 const PNPM_SHIM = `// Vivari: real pnpm shim — see packages/kernel-host/load-real-pnpm.js.
-require(${JSON.stringify(PNPM_VFS_ROOT + "/bin/pnpm.cjs")});
+${PNPM_ENV}require(${JSON.stringify(PNPM_VFS_ROOT + "/bin/pnpm.cjs")});
 `;
 const PNPX_SHIM = `// Vivari: real pnpx shim — see packages/kernel-host/load-real-pnpm.js.
-require(${JSON.stringify(PNPM_VFS_ROOT + "/bin/pnpx.cjs")});
+${PNPM_ENV}require(${JSON.stringify(PNPM_VFS_ROOT + "/bin/pnpx.cjs")});
 `;
 
 /** True once the real pnpm tree is present in the VFS (e.g. restored from OPFS).
