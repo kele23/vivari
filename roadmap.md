@@ -74,7 +74,12 @@ quota (shared with Cache API). Design — **write-behind mirror**, not a backing
 - Layout `vv-vfs/{files/…, manifest.json}`: one OPFS file per VFS file (bytes), plus a small
   manifest `[path,{kind,mode,target}]` that recreates dirs + symlinks (OPFS has neither).
 - Boot `restore()` replays the manifest into the VFS **before** the FS worker serves any
-  syscall (calls the VFS directly, so it never re-enters the queue).
+  syscall (calls the VFS directly, so it never re-enters the queue). It can be **scoped**:
+  `BootOptions.deferRestoreRoots` leaves the named project subtrees in the mirror, and the
+  `vv-restore-roots` request replays one when that project is opened. The studio defers every
+  project Home lists, so a tab pays for what it opens instead of everything on the origin;
+  the deferred entries stay in the index this kernel merges into, so cross-tab writes and
+  deletes keep working for them.
 - Only the browser wires it (`packages/core/src/workers/fs-worker.ts`); **headless injects no adapter**
   (`new FsServer(vfs)`), so `verify-node`/`verify-express` are unchanged and still green.
 - System/volatile dirs are skipped (`/bin` coreutils re-install each boot, `/tmp`,`/proc`,
