@@ -130,6 +130,12 @@ export class FsServer {
     // every process's fs traffic one request at a time, so the table is atomic
     // without any locking of its own — see file-locks.js.
     this.fileLocks = new FileLocks();
+    // Optional hooks installed by the FS worker once the OPFS mirror exists (see
+    // service()): replay a deferred file body before a syscall needs it, and merge
+    // deferred names into a READDIR reply. Null = a plain VFS server (headless, or
+    // an embedder that defers nothing).
+    this.beforeRequest = null;
+    this.afterResponse = null;
   }
 
   // Could a mutation at `path` reach any watcher? Cheap gate for the exists()
@@ -227,39 +233,93 @@ export class FsServer {
     if (rootBucket) fan(rootBucket);
   }
 
-  /** Service one pending request sitting in the given client's SAB. */
+  /**
+   * Service one pending request sitting in the given client's SAB.
+   *
+   * The gate (`beforeRequest`, installed by the FS worker when the OPFS mirror holds
+   * deferred file bodies) runs first: it may serve the request itself, ask for a
+   * deferred body to be replayed and only then serve it, or decline and let the
+   * opcode run immediately. Either way the reply is written from reply()/replyErr(),
+   * so the caller's Atomics.wait contract is unchanged.
+   */
   service(clientId) {
     const c = this.clients.get(clientId);
     if (!c) return;
-    const { ctrl, data } = c;
-    const opcode = Atomics.load(ctrl, I_OPCODE);
-    const { flags, fields } = decodeRequest(data.slice(0, Atomics.load(ctrl, I_REQ_LEN)));
+    const opcode = Atomics.load(c.ctrl, I_OPCODE);
+    const { flags, fields } = decodeRequest(c.data.slice(0, Atomics.load(c.ctrl, I_REQ_LEN)));
+    const req = { opcode, flags, fields, clientId };
+    const gate = this.beforeRequest ? this.beforeRequest(req) : null;
+    if (gate && typeof gate.then === "function") {
+      // The replay runs on this thread while the caller stays parked. A replay that
+      // fails is not its own answer: dispatch then reports the opcode's real error.
+      void gate.then(
+        () => this.complete(req),
+        () => this.complete(req),
+      );
+      return;
+    }
+    if (gate && gate.done) {
+      this.reply(req, gate.done);
+      return;
+    }
+    this.complete(req);
+  }
+
+  /** Run the opcode and reply — after the gate (if any) has settled. */
+  complete(req) {
+    if (!this.clients.has(req.clientId)) return; // unregistered while replaying
+    let bytes;
     try {
-      const bytes = this.dispatch(opcode, flags, fields, clientId);
-      if (bytes.length > data.length) {
-        // The response doesn't fit the shared window (e.g. a whole-file read of a
-        // >1 MiB file). Signal EFBIG so the client retries via the chunked fd path
-        // instead of throwing an opaque "offset is out of bounds" from data.set().
-        // Both clients now do: the runtime for fs.readFileSync, and the kernel's
-        // own fs for readFile/readFileBytes.
-        const e = encodeString(WINDOW_OVERFLOW_ERROR);
-        data.set(e, 0);
-        Atomics.store(ctrl, I_RES_LEN, e.length);
-        Atomics.store(ctrl, I_STATE, STATE_RESPONSE_ERR);
-        Atomics.notify(ctrl, I_STATE);
-        return;
-      }
-      data.set(bytes, 0);
-      Atomics.store(ctrl, I_RES_LEN, bytes.length);
-      Atomics.store(ctrl, I_STATE, STATE_RESPONSE_OK);
-      Atomics.notify(ctrl, I_STATE);
+      bytes = this.dispatch(req.opcode, req.flags, req.fields, req.clientId);
     } catch (err) {
-      const bytes = encodeString(typeof err === "string" ? err : String(err?.message || "EIO"));
-      data.set(bytes, 0);
-      Atomics.store(ctrl, I_RES_LEN, bytes.length);
+      this.replyErr(req, err);
+      return;
+    }
+    if (this.afterResponse) {
+      try {
+        const merged = this.afterResponse(req, bytes);
+        if (merged) bytes = merged;
+      } catch {
+        /* the opcode's own reply is still the answer */
+      }
+    }
+    this.reply(req, bytes);
+  }
+
+  /** Write a successful reply into the client's SAB and wake it. */
+  reply(req, bytes) {
+    const c = this.clients.get(req.clientId);
+    if (!c) return;
+    const { ctrl, data } = c;
+    if (bytes.length > data.length) {
+      // The response doesn't fit the shared window (e.g. a whole-file read of a
+      // >1 MiB file). Signal EFBIG so the client retries via the chunked fd path
+      // instead of throwing an opaque "offset is out of bounds" from data.set().
+      // Both clients now do: the runtime for fs.readFileSync, and the kernel's
+      // own fs for readFile/readFileBytes.
+      const e = encodeString(WINDOW_OVERFLOW_ERROR);
+      data.set(e, 0);
+      Atomics.store(ctrl, I_RES_LEN, e.length);
       Atomics.store(ctrl, I_STATE, STATE_RESPONSE_ERR);
       Atomics.notify(ctrl, I_STATE);
+      return;
     }
+    data.set(bytes, 0);
+    Atomics.store(ctrl, I_RES_LEN, bytes.length);
+    Atomics.store(ctrl, I_STATE, STATE_RESPONSE_OK);
+    Atomics.notify(ctrl, I_STATE);
+  }
+
+  /** Write an error reply into the client's SAB and wake it. */
+  replyErr(req, err) {
+    const c = this.clients.get(req.clientId);
+    if (!c) return;
+    const { ctrl, data } = c;
+    const bytes = encodeString(typeof err === "string" ? err : String(err?.message || "EIO"));
+    data.set(bytes, 0);
+    Atomics.store(ctrl, I_RES_LEN, bytes.length);
+    Atomics.store(ctrl, I_STATE, STATE_RESPONSE_ERR);
+    Atomics.notify(ctrl, I_STATE);
   }
 
   /**

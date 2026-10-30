@@ -15,12 +15,32 @@
 // Origin Private File System so a project survives reload. OPFS sync access
 // handles are only available inside a Worker — this one — which is exactly why
 // the adapter lives here. On boot we restore the manifest into the VFS BEFORE
-// serving any syscall; afterwards FsServer forwards mutations to the adapter.
+// serving any syscall, but scoped: what the embedder defers (project roots, and
+// optionally the package-manager cache bodies) stays on OPFS and is replayed on
+// first use — see restore() and installDeferredHydration(). Afterwards FsServer
+// forwards mutations to the adapter.
 
 import initKernel, { VirtualFileSystem } from "../../../vfs/pkg/vivari_vfs.js";
 import { FsServer } from "../../../kernel-host/fs-server.js";
 import { createOpfsPersistence } from "../../../kernel-host/opfs-persistence.js";
 import { createDepCache } from "../../../kernel-host/dep-cache.js";
+import {
+  decodeBytes,
+  encodeString,
+  bytesToU32,
+  OP_READ_FILE,
+  OP_OPEN,
+  OP_STAT,
+  OP_LSTAT,
+  OP_EXISTS,
+  OP_READDIR,
+  OP_LINK,
+  OP_RENAME,
+  OP_CHMOD,
+  OP_UTIMES,
+  OP_UNLINK,
+  OP_RMDIR,
+} from "../../../protocol/syscall.js";
 
 const post = (type, extra, transfer) =>
   self.postMessage({ type, ...extra }, transfer && transfer.length ? transfer : undefined);
@@ -34,6 +54,13 @@ let compressionOn = false; // whole-file lazy compression gate (URL ?compress=1)
 // entries are read but not replayed into the VFS until a hydrate request asks for
 // them (the studio asks when the user opens that project). null = nothing deferred.
 let deferRestoreRoots = null;
+// Leave package-manager cache FILE bodies on OPFS too (BootOptions.deferCacheFiles).
+// Directories are still replayed — an inode is free and a cache directory must list
+// and stat normally — so each body is replayed the first time a syscall reads it
+// (see installDeferredHydration).
+let deferCacheFiles = false;
+// POSIX O_TRUNC from Node's fs.constants (the runtime passes these straight through).
+const O_TRUNC = 0o1000;
 const queue = []; // messages that arrive before the VFS finishes booting
 
 // Apply the current compression gate to the VFS. Guarded so an older wasm build
@@ -117,7 +144,10 @@ function handle(msg) {
       // Logical (uncompressed) footprint, so the readout can show the ratio.
       const logical =
         vfs && typeof vfs.logical_mem_bytes === "function" ? vfs.logical_mem_bytes() : -1;
-      post("fs-mem", { id: msg.id, bytes, files, logical });
+      // How many indexed paths (project subtrees + cache bodies) this tab leaves on
+      // OPFS instead of in the VFS: the memory readout and the smokes read it.
+      const deferred = server && server.persistence ? server.persistence.deferredCount() : -1;
+      post("fs-mem", { id: msg.id, bytes, files, logical, deferred });
       break;
     }
     case "fs-set-compression":
@@ -196,6 +226,7 @@ self.onmessage = (event) => {
   // of waiting in `queue` for the VFS to exist.
   if (d && d.type === "fs-defer-roots") {
     deferRestoreRoots = Array.isArray(d.roots) ? d.roots.map(String) : [];
+    deferCacheFiles = d.cacheFiles === true;
     return;
   }
   if (server) handle(d);
@@ -320,6 +351,61 @@ const PM_CACHE_PREFIXES = [
 const isPmCachePath = (p) =>
   PM_CACHE_PREFIXES.some((pre) => p === pre || p.startsWith(pre + "/"));
 
+// ---- deferred package-manager cache bodies: replay on first use -----------
+// The boot restore leaves cache FILE bodies on OPFS (BootOptions.deferCacheFiles);
+// directories are replayed. A syscall that needs a body's bytes asks the mirror to
+// replay exactly that file before it runs — the caller is parked in Atomics.wait, so
+// this is the same trick as writeLarge. Everything else is answered without bytes:
+//   * a truncating write replaces the content, so it must NOT replay the old bytes;
+//   * deleting a deferred entry drops its OPFS copy instead of reading it;
+//   * existence is a probe, so it is answered from the index.
+// npm/pnpm's warm-install reads (cacache's content path: stat + open/read; pnpm's
+// link/copy out of the store) all land on the replay rule.
+const OBSERVE_BYTES = new Set([
+  OP_READ_FILE,
+  OP_OPEN,
+  OP_STAT,
+  OP_LSTAT,
+  OP_LINK,
+  OP_RENAME,
+  OP_CHMOD,
+  OP_UTIMES,
+]);
+const DROP_DEFERRED = new Set([OP_UNLINK, OP_RMDIR]);
+const PROBE_ONLY = new Set([OP_EXISTS]);
+
+function installDeferredHydration(target, persistence) {
+  if (!persistence) return;
+  target.beforeRequest = (req) => {
+    if (!OBSERVE_BYTES.has(req.opcode) && !DROP_DEFERRED.has(req.opcode) && !PROBE_ONLY.has(req.opcode))
+      return null;
+    const path = decodeBytes(req.fields[0]);
+    if (!persistence.isDeferredPath(path)) return null;
+    if (PROBE_ONLY.has(req.opcode)) return { done: new Uint8Array([1]) };
+    if (DROP_DEFERRED.has(req.opcode))
+      return persistence
+        .dropDeferred(path)
+        .then((dropped) => (dropped ? { done: new Uint8Array(0) } : null));
+    if (req.opcode === OP_OPEN) {
+      const oflags = bytesToU32(req.fields[1]) | 0;
+      // 'w' (O_WRONLY|O_TRUNC) replaces the bytes; a read, a read+write or an
+      // append needs the old ones.
+      if ((oflags & 3) === 1 && (oflags & O_TRUNC) !== 0) return null;
+    }
+    return persistence.hydrateFile(path);
+  };
+  // A cache directory lists normally except for the files still deferred: merge their
+  // names in, so maintenance commands (npm cache verify, pnpm store status) see the
+  // same tree the mirror holds.
+  target.afterResponse = (req, bytes) => {
+    if (req.opcode !== OP_READDIR || persistence.deferredCount() === 0) return null;
+    const names = persistence.deferredNames(decodeBytes(req.fields[0]));
+    if (!names || !names.length) return null;
+    const listed = decodeBytes(bytes).split("\n").filter(Boolean);
+    return encodeString([...new Set([...listed, ...names])].sort().join("\n"));
+  };
+}
+
 const shouldPersist = (p) => {
   // node_modules is NOT mirrored file-by-file: it's large (thousands of files),
   // which made the per-file OPFS restore the dominant cold-reopen cost. Instead
@@ -410,12 +496,16 @@ async function createOpfsDepStorage() {
       const t0 = Date.now();
       let announced = false;
       // The embedder names the subtrees it would rather pay for on demand (the
-      // studio: every project it knows about). Everything else — the package-manager
-      // caches, anything the embedder did not claim — is replayed as before.
+      // studio: every project it knows about), and optionally the package-manager
+      // caches, for which only the FILE bodies are deferred — a cache directory is
+      // replayed in full so listing and stat-ing it behave.
       const roots = deferRestoreRoots || [];
-      const isDeferred = roots.length
-        ? (p) => roots.some((r) => p === r || p.startsWith(r + "/"))
-        : undefined;
+      const isDeferred =
+        roots.length || deferCacheFiles
+          ? (p, entry) =>
+              (roots.length > 0 && roots.some((r) => p === r || p.startsWith(r + "/"))) ||
+              (deferCacheFiles && entry.k === "file" && isPmCachePath(p))
+          : undefined;
       const { restored, deferred } = await persistence.restore(
         (done, total) => {
           // Structured progress for the host UI (relayed by the kernel worker as
@@ -436,7 +526,7 @@ async function createOpfsDepStorage() {
         post("log", {
           line:
             `  [opfs] restored ${restored} entries from a previous session` +
-            (deferred ? ` (${deferred} deferred until their project opens)` : "") +
+            (deferred ? ` (${deferred} deferred until first use)` : "") +
             ` (${Date.now() - t0}ms)`,
           cls: "muted",
         });
@@ -461,6 +551,7 @@ async function createOpfsDepStorage() {
   }
 
   server = new FsServer(vfs, persistence);
+  installDeferredHydration(server, persistence);
   // Tell the kernel when a fetched response body has been fully read, so it can
   // drop its reference and reclaim the scratch file. These bodies live in Wasm
   // memory that never shrinks, so holding them past their single read is a direct
