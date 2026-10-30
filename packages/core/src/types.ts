@@ -56,6 +56,17 @@ export interface BootOptions {
    */
   deferRestoreRoots?: readonly string[];
   /**
+   * Leave package-manager cache bodies on OPFS at boot as well, and replay each one
+   * the first time a syscall reads it. The caches are shared by every project on the
+   * origin, so without this a tab carries the cache entries of projects it never
+   * opens; with it, an install pays only for the tarballs it actually reads. The
+   * cache's directories are still restored (so listing and stat-ing a cache directory
+   * behave), and a deferred file is replayed exactly once, on demand — no hydrate call
+   * is needed. Deleting one never replays it, and existence is answered from the
+   * mirror's index.
+   */
+  deferCacheFiles?: boolean;
+  /**
    * The preview Service Worker. It must be served **same-origin** at a scope that
    * covers the URLs you want proxied into the VM (default scope `/`). Pass a URL
    * string to override the default (`"/sw.js"`), or `false` to skip registration
