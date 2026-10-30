@@ -251,7 +251,13 @@ only wired when `VV_DEBUG` is set, so non-debug runs never allocate it.
   names project roots whose entries stay in the mirror (indexed, not replayed), and the
   `vv-restore-roots` request replays one of them when the embedder actually opens that
   project — so a tab carries the projects it opened, not every project on the origin.
-  Use `?reset` on the demo URL to wipe it.
+  `BootOptions.deferCacheFiles` applies the same idea per FILE to the package-manager
+  caches: their bodies stay in the mirror and are replayed one at a time by the FS
+  worker the first time a syscall reads them (`FsServer.beforeRequest`), so an install
+  pays only for the tarballs it reads. Cache directories are still replayed, `READDIR`
+  merges the deferred names, existence is answered from the index, a truncating write
+  never replays old bytes, and deleting a deferred entry drops the OPFS copy instead of
+  reading it. Use `?reset` on the demo URL to wipe it.
   Volatile/re-seeded paths are excluded (`fs-worker.js` `IGNORE`: `/bin /tmp /proc
   /dev /etc /usr /var/cache`). The package-manager caches deliberately live in a
   PERSISTED location (`/home/user/.cache` for npm/yarn/corepack, `/home/user/.local/
