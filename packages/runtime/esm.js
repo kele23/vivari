@@ -297,6 +297,29 @@ function parseImportClause(clause) {
   return out;
 }
 
+// Whitespace AND comments may sit between any two tokens — zod v4 emits
+// `export /*@__NO_SIDE_EFFECTS__*/ function`. A scanner that skips only whitespace reads
+// the comment's `/` as "no export form follows", leaves the `export` in the CJS body and
+// the module dies with "Unexpected token 'export'". Every route that imported zod failed
+// inside the WebContainer this way.
+function skipSpaceAndComments(src, i) {
+  const n = src.length;
+  for (;;) {
+    while (i < n && /\s/.test(src[i])) i++;
+    if (src[i] === "/" && src[i + 1] === "/") {
+      while (i < n && src[i] !== "\n") i++;
+      continue;
+    }
+    if (src[i] === "/" && src[i + 1] === "*") {
+      i += 2;
+      while (i < n && !(src[i] === "*" && src[i + 1] === "/")) i++;
+      i = Math.min(i + 2, n);
+      continue;
+    }
+    return i;
+  }
+}
+
 // A string/comment/template-aware scan that finds top-level `export` keywords and
 // emits edits to make the body valid CJS (the exports object itself is built from
 // the lexer's export-name list). `isFrom(pos)` marks re-export statements already
@@ -352,7 +375,7 @@ function scanExportEdits(src, isFrom) {
     ) {
       if (isFrom(i)) { i += 6; continue; }
       let r = i + 6;
-      while (r < n && /\s/.test(src[r])) r++;
+      r = skipSpaceAndComments(src, r);
       // `export` is only a keyword when a real export form follows: `default`,
       // `{`, `*`, or a declaration (function/class/const/let/var/async/... —
       // i.e. an identifier-start char). When the next token is `:` / `.` / `(`

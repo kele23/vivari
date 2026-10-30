@@ -11850,3 +11850,18 @@ registration. Checked against the running dev server in headless Chrome: with th
 missing the terminal names it and how to build it, and after building it the next `npm` in
 the same page loads the real CLI. Gate: two sections in `spike-install-latency.mjs`; with the
 old code 5 of their 10 checks fail.
+## A comment between `export` and its declaration broke every zod route (this change)
+
+The ESM→CJS transpiler's `scanExportEdits` skipped whitespace after `export`, then
+decided whether a real export form followed. Comments are legal between any two tokens,
+and zod v4's build emits `export /*@__NO_SIDE_EFFECTS__*/ function`: the scanner read the
+comment's `/`, concluded "not an export", and left the keyword in the CJS body. The
+module then failed to compile as both a plain and an async function, so every route that
+imported zod died inside the WebContainer with `Unexpected token 'export' (while
+compiling .../zod/v4/core/core.js [esm])` — found by the Facilis probe's database
+roundtrip, the first app code to import zod from a Nitro route in-VM.
+
+`scanExportEdits` now advances over whitespace **and** comments (`skipSpaceAndComments`)
+before deciding, which covers `export /*c*/ function`, `export /*c*/ const`, a line
+comment and `export /*c*/ default`. The regression case in `scripts/spike-esm.mjs`
+asserts the rewritten source has no bare `export`, compiles, and exports all four forms.

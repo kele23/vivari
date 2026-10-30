@@ -4507,6 +4507,13 @@ also unchanged.
   still can't truly block its importer (the "only the ENTRY can block on TLA" rule
   above), but it now at least *compiles* instead of throwing at load. Proven by
   `scripts/spike-esm.mjs`.
+- **Skip comments between tokens, not just whitespace.** zod v4's build emits
+  `export /*@__NO_SIDE_EFFECTS__*/ function`. `scanExportEdits` skipped only whitespace
+  after `export`, read the comment's `/` as "not an export form", left the keyword in the
+  CJS body and every server route importing zod died inside the VM with `Unexpected
+  token 'export'` (the AsyncFunction retry reported the same thing — the transpiled
+  source still contained the keyword). `skipSpaceAndComments` is the one place that rule
+  lives; any token scanner added here must use it. Proven by `scripts/spike-esm.mjs`.
 - **`esm.js` does NOT strip TypeScript types** — it only rewrites `import`/`export`.
   A raw `.ts` run through OC's loader (`node --experimental-strip-types x.ts`) is
   *not* type-stripped: `esm.js` removes the leading `export `/`import ` and leaves

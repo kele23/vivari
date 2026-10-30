@@ -273,5 +273,40 @@ console.log("\n== [esm] default import of __esModule CJS with no `default` ==");
   check("no __esModule -> module.exports", mod.exports.c === plain);
 }
 
+// ── 7. a comment between `export` and its declaration ─────────────────────────
+// Comments are legal between ANY two tokens, and zod v4's build emits
+// `export /*@__NO_SIDE_EFFECTS__*/ function`. The scanner used to skip only whitespace
+// after `export`, read the comment's `/` as "not an export form", left the keyword in
+// the CJS body, and every server route importing zod died inside the VM with
+// "Unexpected token 'export'" (module.js retried it as an AsyncFunction and reported
+// the same thing, because the transpiled source still had the keyword).
+console.log("\n== [esm] comment between `export` and its declaration ==");
+{
+  const src =
+    `export /*@__NO_SIDE_EFFECTS__*/ function $constructor(name) { return name; }\n` +
+    `export /* keep */ const answer = 42;\n` +
+    "export // trailing\nconst later = 1;\n" +
+    "export default /*why*/ function named() { return 'd'; }\n";
+  const out = transpileEsm(src, "/commented.js");
+  check("no bare `export` survives the rewrite", !/^\s*export\b/m.test(out));
+  let compiled = true;
+  const mod = { exports: Object.create(null) };
+  try {
+    new Function("__oc_exports", "__oc_require", "__oc_module", out + "\n").call(
+      mod.exports,
+      mod.exports,
+      () => ({}),
+      mod,
+    );
+  } catch (e) {
+    compiled = false;
+    console.log("    compile error:", e.message);
+  }
+  check("the rewritten module compiles", compiled);
+  check("a commented function declaration is exported", compiled && mod.exports.$constructor("x") === "x");
+  check("a commented const is exported", compiled && mod.exports.answer === 42);
+  check("a commented default declaration is exported", compiled && mod.exports.default() === "d");
+}
+
 console.log(`\nRESULT: ${failures === 0 ? "PASS — esm.js live-binding + TLA loader guarantees hold" : `FAIL — ${failures} check(s) failed`}`);
 process.exit(failures === 0 ? 0 : 1);
