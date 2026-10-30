@@ -79,7 +79,13 @@ quota (shared with Cache API). Design — **write-behind mirror**, not a backing
   `vv-restore-roots` request replays one when that project is opened. The studio defers every
   project Home lists, so a tab pays for what it opens instead of everything on the origin;
   the deferred entries stay in the index this kernel merges into, so cross-tab writes and
-  deletes keep working for them.
+  deletes keep working for them. `BootOptions.deferCacheFiles` additionally leaves the
+  package-manager cache BODIES in the mirror (directories are still replayed) and the FS
+  worker replays one per syscall, the first time it is read: an install pays only for the
+  tarballs it actually reads, not for every project's cache. The decisions that make it
+  correct are in one place (`installDeferredHydration` in fs-worker.ts): truncating writes
+  do not replay, deletes drop the OPFS copy, existence comes from the index, and readdir
+  merges the deferred names.
 - Only the browser wires it (`packages/core/src/workers/fs-worker.ts`); **headless injects no adapter**
   (`new FsServer(vfs)`), so `verify-node`/`verify-express` are unchanged and still green.
 - System/volatile dirs are skipped (`/bin` coreutils re-install each boot, `/tmp`,`/proc`,

@@ -694,14 +694,23 @@ export class KernelBridge {
    *
    * `deferRestoreRoots` (BootOptions.deferRestoreRoots) names project roots whose
    * persisted files stay on OPFS at boot; hydrate one with a `vv-restore-roots`
-   * request once the project is actually opened.
+   * request once the project is actually opened. `deferCacheFiles`
+   * (BootOptions.deferCacheFiles) leaves package-manager cache bodies there too: the
+   * FS worker replays one the first time a syscall reads it, so no explicit hydrate
+   * call is needed for them.
    */
-  boot(compress = true, netRelay?: string, deferRestoreRoots?: readonly string[]) {
+  boot(
+    compress = true,
+    netRelay?: string,
+    deferRestoreRoots?: readonly string[],
+    deferCacheFiles?: boolean,
+  ) {
     this.worker.postMessage({
       type: "init",
       compress,
       netRelay: netRelay || undefined,
       deferRestoreRoots: deferRestoreRoots?.length ? [...deferRestoreRoots] : undefined,
+      deferCacheFiles: deferCacheFiles || undefined,
     });
   }
 

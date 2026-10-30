@@ -91,8 +91,41 @@ export async function createOpfsPersistence({
   // deferred at boot (see restore's `isDeferred`). They stay in `meta`, so the
   // index merge below keeps writing them and a later hydrate() finds them.
   const deferred = new Map(); // path -> entry
+  // Basenames of deferred files per directory. Directories themselves are always
+  // materialized (an inode costs nothing, and readdir/stat of a cache directory must
+  // behave), so READDIR needs these names to list a cache directory whose files are
+  // still only on OPFS. Set once per deferred file, dropped when it is replayed.
+  const deferredByDir = new Map(); // dir -> Set<name>
   // Paths this kernel has replayed into the VFS (boot restore + hydrate).
   const materialized = new Set();
+  const dirOf = (p) => {
+    const i = p.lastIndexOf("/");
+    return i > 0 ? p.slice(0, i) : "/";
+  };
+  const nameOf = (p) => p.slice(p.lastIndexOf("/") + 1);
+  function noteDeferred(path, m) {
+    deferred.set(path, m);
+    const dir = dirOf(path);
+    let names = deferredByDir.get(dir);
+    if (!names) deferredByDir.set(dir, (names = new Set()));
+    names.add(nameOf(path));
+  }
+  function forgetDeferred(path) {
+    if (!deferred.delete(path)) return;
+    const dir = dirOf(path);
+    const names = deferredByDir.get(dir);
+    if (!names) return;
+    names.delete(nameOf(path));
+    if (!names.size) deferredByDir.delete(dir);
+  }
+  // path and everything below it (a deleted directory): no deferred entry under it
+  // may be replayed after the delete.
+  function forgetDeferredSubtree(path) {
+    forgetDeferred(path);
+    if (!deferred.size) return;
+    const pre = path + "/";
+    for (const k of [...deferred.keys()]) if (k.startsWith(pre)) forgetDeferred(k);
+  }
 
   const parts = (p) => p.split("/").filter(Boolean);
 
@@ -287,6 +320,10 @@ export async function createOpfsPersistence({
   }
   function onWrite(path) {
     if (!shouldPersist(path)) return;
+    // A write makes any deferred copy of this path obsolete. The VFS now holds the
+    // truth (the caller wrote it) and drain() mirrors it over the OPFS blob, so the
+    // old bytes must never be replayed on top.
+    forgetDeferred(path);
     const queue = queueFor(path);
     // A delete followed by a write must not leave old descendants on disk.
     queue.set(path, queue.get(path) === "d" || queue.get(path) === "r" ? "r" : "w");
@@ -294,6 +331,9 @@ export async function createOpfsPersistence({
   }
   function onDelete(path) {
     if (!shouldPersist(path)) return;
+    // A deleted path (and its subtree) can no longer be replayed: a deferred file
+    // removed by this tab must not resurrect on the next read.
+    forgetDeferredSubtree(path);
     // Drop any queued writes under this subtree — they're moot now. Both queues are
     // swept: a directory can hold project paths and cache paths at once.
     const pre = path + "/";
@@ -478,10 +518,14 @@ export async function createOpfsPersistence({
   // Replay the manifest into the VFS. Returns { restored, deferred } (0/0 when
   // nothing was persisted yet). Runs BEFORE the FS worker serves any syscall and
   // calls the VFS directly (via `access`), so it never re-enters the queue.
-  // `options.isDeferred(path, entry)` names the entries to leave on OPFS at boot: a
-  // deferred project subtree takes every entry.
+  // `options.isDeferred(path, entry)` names the entries to leave on OPFS at boot:
+  // a deferred project subtree takes every entry; a deferred package-manager cache
+  // only the file bodies.
   async function restore(onProgress, options = {}) {
-    const isDeferred =
+    // `isDeferred(path, entry)` sees the kind too: a deferred project subtree
+    // takes every entry, a deferred package-manager cache only the file bodies (its
+    // directories are materialized, so listing/stat-ing a cache directory behaves).
+    const shouldDefer =
       typeof options.isDeferred === "function" ? options.isDeferred : () => false;
     // Read under the manifest lock, so a tab booting while another rewrites the index
     // waits for the write instead of racing it. Without the lock a read can land between
@@ -508,7 +552,7 @@ export async function createOpfsPersistence({
     const later = [];
     for (const e of arr) {
       if (!shouldPersist(e[0])) drop.push(e);
-      else if (isDeferred(e[0])) later.push(e);
+      else if (shouldDefer(e[0], e[1])) later.push(e);
       else keep.push(e);
     }
     for (const [path, m] of keep) meta.set(path, m);
@@ -516,7 +560,7 @@ export async function createOpfsPersistence({
     // later hydrate() find them, and what stops a write elsewhere from dropping them.
     for (const [path, m] of later) {
       meta.set(path, m);
-      deferred.set(path, m);
+      noteDeferred(path, m);
     }
     // Those paths are not persisted any more, so their index entries are dead weight
     // everywhere — record the deletion so the merge below drops them from the shared
@@ -568,7 +612,7 @@ export async function createOpfsPersistence({
         if (owned.has(path) || pending.has(path) || pendingLow.has(path)) continue;
         if (!shouldPersist(path)) continue;
         meta.set(path, m);
-        deferred.set(path, m);
+        noteDeferred(path, m);
       }
     }
     const selected = [];
@@ -578,9 +622,86 @@ export async function createOpfsPersistence({
     // "Attempted" is what matters: an entry whose OPFS blob is gone (another tab
     // deleted the project after this one booted) cannot be materialized, and a retry
     // on the next open would re-read the same missing blob.
-    for (const [path] of selected) deferred.delete(path);
+    for (const [path] of selected) forgetDeferred(path);
     return n;
   }
 
-  return { onWrite, onDelete, onRename, flush, restore, hydrate };
+  // ---- targeted replay: one file, the first time a syscall needs it ---------
+  // The boot pass leaves package-manager cache BODIES on OPFS (see restore's
+  // isDeferred). A cache read is served by replaying exactly the file it names, on
+  // the spot: the FS worker awaits this before dispatching the syscall, so the VFS
+  // never sees a half-materialized cache and the caller's read is synchronous. The
+  // entry stops being deferred at that point, so it is replayed once, not per syscall.
+  async function hydrateFile(path) {
+    const m = deferred.get(path);
+    if (!m) return false;
+    let ok = true;
+    try {
+      const slash = path.lastIndexOf("/");
+      if (slash > 0) access.mkdirp(path.slice(0, slash));
+      if (m.k === "file") {
+        const bytes = await readBytes(path);
+        // A write/delete from another client may have invalidated the entry while the
+        // OPFS read was in flight; those bytes are already stale, so do not replay them.
+        if (!deferred.has(path)) return false;
+        access.writeFile(path, bytes);
+      } else if (m.k === "symlink") access.symlink(m.t, path);
+      else access.mkdirp(path);
+    } catch {
+      ok = false;
+    }
+    forgetDeferred(path);
+    if (ok) materialized.add(path);
+    return ok;
+  }
+
+  // Remove a deferred entry WITHOUT replaying it: the caller is deleting it (cacache
+  // rm on a corrupt entry), and the old bytes are not worth reading. Returns false
+  // when the path is not deferred, so the caller takes the normal VFS path.
+  async function dropDeferred(path) {
+    const m = deferred.get(path);
+    if (!m) return false;
+    await removePath(path); // recursive on OPFS for a directory
+    if (m.k === "dir") {
+      // The VFS never saw the subtree, so the whole index entry set has to go with it.
+      const pre = path + "/";
+      for (const k of [...deferred.keys()]) {
+        if (!k.startsWith(pre)) continue;
+        meta.delete(k);
+        owned.set(k, "d");
+        forgetDeferred(k);
+      }
+    }
+    meta.delete(path);
+    owned.set(path, "d");
+    forgetDeferred(path);
+    manifestDirty = true;
+    // Nothing was queued for this path, so no drain will run; the index still has to
+    // record the delete, and maybeWriteManifest is coalesced anyway.
+    void maybeWriteManifest(false);
+    return true;
+  }
+
+  // Names of the deferred children of a directory, for the FS worker's READDIR merge.
+  function deferredNames(dir) {
+    const names = deferredByDir.get(dir);
+    return names ? [...names] : null;
+  }
+
+  const isDeferredPath = (path) => deferred.has(path);
+  const deferredCount = () => deferred.size;
+
+  return {
+    onWrite,
+    onDelete,
+    onRename,
+    flush,
+    restore,
+    hydrate,
+    hydrateFile,
+    dropDeferred,
+    deferredNames,
+    isDeferredPath,
+    deferredCount,
+  };
 }

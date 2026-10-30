@@ -1329,6 +1329,10 @@ let netRelayUrl: string | null = null;
 // hydrates one when the user opens it (vv-restore-roots), so a tab carries the
 // projects it actually opened instead of every project on the origin.
 let deferredRestoreRoots: string[] = [];
+// Leave package-manager cache FILE bodies on OPFS at boot too
+// (BootOptions.deferCacheFiles): the FS worker replays one when a syscall reads it, so
+// a tab carries only the cache entries its own installs touched.
+let deferCacheFiles = false;
 
 // A bound port isn't the same as a *serving* one: Vite 8 (rolldown) binds :port
 // a few times during startup (bind → close → rebind), so the first `listen`
@@ -1396,7 +1400,11 @@ function queryVfsMem(timeoutMs = 2000) {
   return new Promise((resolve) => {
     const id = memReqSeq++;
     const done = (data) =>
-      resolve(data ? { bytes: data.bytes, files: data.files, logical: data.logical } : null);
+      resolve(
+        data
+          ? { bytes: data.bytes, files: data.files, logical: data.logical, deferred: data.deferred }
+          : null,
+      );
     memPending.set(id, done);
     setTimeout(() => {
       if (memPending.delete(id)) resolve(null);
@@ -1477,7 +1485,7 @@ async function boot() {
   // vv-restore-roots). Sent synchronously here, before the wasm boot: the FS worker
   // keeps this one out of its message queue precisely because it has to be known
   // before the restore starts.
-  fsWorker.postMessage({ type: "fs-defer-roots", roots: deferredRestoreRoots });
+  fsWorker.postMessage({ type: "fs-defer-roots", roots: deferredRestoreRoots, cacheFiles: deferCacheFiles });
   let onKernelFsMessage = () => {};
   let fsFailed = (_err) => {};
   const fsReady = new Promise((resolve, reject) => {
@@ -2643,6 +2651,9 @@ self.onmessage = async (event) => {
     deferredRestoreRoots = Array.isArray(m.deferRestoreRoots)
       ? m.deferRestoreRoots.filter((r: unknown) => typeof r === "string" && r)
       : [];
+    // BootOptions.deferCacheFiles: package-manager cache bodies are replayed on first
+    // read instead of at boot.
+    deferCacheFiles = m.deferCacheFiles === true;
     // `error` (not just `log`) so the SDK's boot() has something to reject on —
     // otherwise a kernel that dies here never posts `ready` and the caller waits
     // out its whole timeout with no idea why.
