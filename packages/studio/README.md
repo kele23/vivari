@@ -18,6 +18,8 @@ npm run preview:studio # preview the production build
 ```
 
 Or from this folder with Bun: `bun run dev` / `bun run build` / `bun run preview`.
+`bun run dev` builds the vendor assets first (its `predev` runs the root one); `bun run
+build` does not, so run `npm run prebuild:studio` from the root before it.
 
 The page must be **cross-origin isolated** (`SharedArrayBuffer`). `vite.config.ts`
 sends `Cross-Origin-Opener-Policy: same-origin` + `Cross-Origin-Embedder-Policy:

@@ -122,8 +122,12 @@ function loadSw({ hostname = "localhost" } = {}) {
   ctx.__calls = calls;
   ctx.__listeners = listeners;
   // Never talk to a real VM: every gate below asserts on the ROUTE taken.
+  // An explicit /preview/<port>/ URL hands down `{ full, stripped, kernel }`, because
+  // whether the prefix is kept is decided per kernel once servePreview has routed the
+  // request (spike-sw-multitab.mjs covers that). With no keep-prefix ports, which is
+  // what this stub's loadKeepPrefixPorts reports, the stripped form is what the VM sees.
   ctx.handlePreview = async (event, port, p) => {
-    ctx.__proxied = { port, path: p };
+    ctx.__proxied = { port, path: p && typeof p === "object" ? p.stripped : p };
     return new Response("from-vm", { status: 200 });
   };
   ctx.loadKeepPrefixPorts = async () => new Set();

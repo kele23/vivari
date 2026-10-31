@@ -42,7 +42,26 @@ const kernelHostIds = new Set();
 // every later subresource of the frame names the frame, whose id that navigation
 // reported as its resultingClientId (see servePreview). In-memory: a revived SW loses
 // it and falls back to the single-kernel heuristic until each tab re-announces.
+//
+// The FIRST navigation of a frame cannot be attributed that way: measured in Chrome
+// 156, an iframe whose parent sets `src` (how the studio's PreviewFrame loads every
+// preview) navigates with an EMPTY clientId. Only later navigations of the same frame
+// name it (a reload names the old document, a new `src` the current one). So the
+// bridge puts its kernel token in the preview URL (KERNEL_PARAM); that navigation is
+// recorded against the token's kernel here and redirected to the clean URL, which
+// keeps the same resultingClientId, so the app never sees the token.
 const frameKernel = new Map();
+const frameSeenAt = new Map(); // frame client id -> ms, for pruning (see pruneRouting)
+function rememberFrame(frameId, kernelId) {
+  frameKernel.set(frameId, kernelId);
+  frameSeenAt.set(frameId, Date.now());
+}
+
+// The query parameter a kernel host adds to its preview URLs (PREVIEW_KERNEL_PARAM in
+// packages/core/src/bridge.ts, which must match), and the tokens hosts have announced
+// with `vv-kernel-host` (token -> kernel host client id).
+const KERNEL_PARAM = "__vv_kernel";
+const kernelByToken = new Map();
 
 // keep-prefix ports per kernel host, because two tabs may disagree about the same port
 // (one template keeps the /preview/<port>/ prefix, the other strips it). The persisted
@@ -297,7 +316,10 @@ self.addEventListener("message", (event) => {
   // A page announcing it hosts a Vivari kernel — remember its client id so
   // handlePreview routes preview HTTP to it even when it's a nested iframe.
   if (d && d.type === "vv-kernel-host") {
-    if (event.source && event.source.id) kernelHostIds.add(event.source.id);
+    if (event.source && event.source.id) {
+      kernelHostIds.add(event.source.id);
+      if (typeof d.token === "string" && d.token) kernelByToken.set(d.token, event.source.id);
+    }
     learnIsolationPolicy(event.source && event.source.url, d.documentIsolationPolicy, (p) =>
       event.waitUntil(p),
     );
@@ -351,7 +373,7 @@ const isKernelWindow = (c) => !isPreviewClient(c) && !isDevtoolsClient(c) && !is
 // resulting frame from the frame itself (see frameKernel). In mode B after an SW
 // eviction the port is gone: detect the bridge client, ask the IDE to re-hand a port,
 // and wait briefly for it before giving up. One matchAll to stay cheap in mode A.
-async function resolveKernelSink(event) {
+async function resolveKernelSink(event, hintKernelId) {
   if (kernelPort)
     return { post: (m, t) => kernelPort.postMessage(m, t || []), cross: true, clientId: null };
   const clients = await self.clients.matchAll({ type: "window", includeUncontrolled: true });
@@ -367,15 +389,40 @@ async function resolveKernelSink(event) {
       return { post: (m, t) => kernelPort.postMessage(m, t || []), cross: true, clientId: null };
     return null;
   }
-  // The kernel this request belongs to: the frame's owner if the navigation recorded
-  // one, else the window the request names — accepted only when it can host a kernel.
+  pruneRouting(clients);
+  // The kernel this request belongs to: the one its URL named (hintKernelId), else the
+  // frame's owner if a navigation recorded one, else the window the request names,
+  // accepted only when it can host a kernel.
   const requester = (event && (event.clientId || event.resultingClientId)) || "";
-  const ownerId = (requester && frameKernel.get(requester)) || requester;
+  const ownerId = hintKernelId || (requester && frameKernel.get(requester)) || requester;
   const owner = ownerId ? clients.find((c) => c.id === ownerId && isKernelWindow(c)) : null;
   const client = owner || pickKernelClient(clients);
   return client
     ? { post: (m, t) => client.postMessage(m, t || []), cross: false, clientId: client.id }
     : null;
+}
+
+// The routing maps above are keyed by client ids, and nothing tells the SW when a
+// client goes away, so drop entries whose clients are gone. Throttled, because it runs
+// on the request path. A frame is kept for a grace period after it was recorded: its
+// navigation records it before the new document exists as a client.
+const PRUNE_EVERY_MS = 30000;
+const FRAME_GRACE_MS = 60000;
+let lastPrune = 0;
+function pruneRouting(clients, now = Date.now()) {
+  if (now - lastPrune < PRUNE_EVERY_MS) return;
+  lastPrune = now;
+  const live = new Set(clients.map((c) => c.id));
+  for (const [frame, kernel] of frameKernel) {
+    const fresh = now - (frameSeenAt.get(frame) || 0) < FRAME_GRACE_MS;
+    if (!live.has(kernel) || (!live.has(frame) && !fresh)) {
+      frameKernel.delete(frame);
+      frameSeenAt.delete(frame);
+    }
+  }
+  for (const [token, kernel] of kernelByToken) if (!live.has(kernel)) kernelByToken.delete(token);
+  for (const id of keepPrefixByClient.keys()) if (!live.has(id)) keepPrefixByClient.delete(id);
+  for (const id of kernelHostIds) if (!live.has(id)) kernelHostIds.delete(id);
 }
 
 // The window that hosts the kernel — a non-preview, non-DevTools, non-bridge
@@ -1132,6 +1179,20 @@ self.addEventListener("fetch", (event) => {
   if (idx !== -1) {
     // Explicit preview URL: <scope>/preview/<port>/<path> — the iframe navigation
     // and any *relative* subresource resolve here.
+    // A kernel host's own preview URL names its kernel (see frameKernel). The token is
+    // ours, never the app's: record it and take it off before anything else sees it.
+    let kernel = null;
+    if (url.searchParams.has(KERNEL_PARAM)) {
+      kernel = kernelByToken.get(url.searchParams.get(KERNEL_PARAM)) || null;
+      url.searchParams.delete(KERNEL_PARAM);
+      if (event.request.mode === "navigate") {
+        // Unknown token (a revived SW lost the map): still redirect, and let the
+        // clean navigation fall back to the single-kernel heuristic.
+        if (kernel && event.resultingClientId) rememberFrame(event.resultingClientId, kernel);
+        event.respondWith(Response.redirect(url.href, 302));
+        return;
+      }
+    }
     const rest = url.pathname.slice(idx + PREVIEW_MARKER.length);
     const slash = rest.indexOf("/");
     const port = parseInt(slash === -1 ? rest : rest.slice(0, slash), 10);
@@ -1140,7 +1201,7 @@ self.addEventListener("fetch", (event) => {
     // Whether the prefix is kept is a per-KERNEL decision (see loadKeepPrefixPorts),
     // and the kernel is only known once the request is routed — so hand both forms
     // down and let servePreview pick after resolving the sink.
-    event.respondWith(handlePreview(event, port, { full, stripped }));
+    event.respondWith(handlePreview(event, port, { full, stripped, kernel }));
     return;
   }
 
@@ -1441,7 +1502,7 @@ async function servePreview(event, port, route, explicitKeepPrefix, served = {})
   // Reach the kernel. Mode A: the same-origin kernel-host window client this request
   // belongs to. Mode B: the persistent port to the (cross-origin) IDE, reviving it if
   // the SW was evicted. `cross` tells us which CORP/COEP headers the response needs.
-  const sink = await resolveKernelSink(event);
+  const sink = await resolveKernelSink(event, route && typeof route === "object" ? route.kernel : null);
   if (sink) served.cross = !!sink.cross;
   if (!sink) {
     // A top-level preview tab (mode B "Open in new tab") whose kernel we can't
@@ -1465,7 +1526,7 @@ async function servePreview(event, port, route, explicitKeepPrefix, served = {})
   // it, so every later subresource of that frame (which names the frame) comes back
   // here. This is what keeps two Studio tabs' previews apart on one origin.
   if (sink.clientId && event.request.mode === "navigate" && event.resultingClientId) {
-    frameKernel.set(event.resultingClientId, sink.clientId);
+    rememberFrame(event.resultingClientId, sink.clientId);
   }
 
   // Keep-prefix apps serve UNDER /preview/<port>/ (see loadKeepPrefixPorts); everyone

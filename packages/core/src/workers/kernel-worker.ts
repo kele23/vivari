@@ -1989,9 +1989,21 @@ async function boot() {
 // (resolved against the app base via vendorUrl). Returns its bytes, or null if
 // the asset isn't served (in which case the tool simply isn't installed — same as
 // a missing npm).
-async function fetchVendorAsset(assetPath: string): Promise<Uint8Array | null> {
+// A missing asset throws rather than returning null. Null used to count as a finished
+// load, so the kernel dropped the registration and `npm` stayed "not found" until a
+// reload even after the asset was built; a throw keeps it, and the kernel prints the
+// reason in the terminal that asked. "Missing" has two shapes: a 404, and a 200 that
+// is an HTML page, which is what Vite's dev server and a Pages SPA answer for a file
+// that is not there.
+class VendorAssetMissing extends Error {}
+async function fetchVendorAsset(assetPath: string): Promise<Uint8Array> {
   const r = await fetch(vendorUrl(assetPath));
-  if (!r.ok) return null;
+  const html = (r.headers.get("content-type") || "").includes("text/html");
+  if (!r.ok || html) {
+    throw new VendorAssetMissing(
+      `${assetPath} is not served here (${r.ok ? "got an HTML page instead of the asset" : `HTTP ${r.status}`})`,
+    );
+  }
   return new Uint8Array(await r.arrayBuffer());
 }
 
@@ -2032,7 +2044,16 @@ function registerLazyTools() {
           return res;
         } catch (e) {
           post("log", { line: `  [${label}] load failed (${(e && (e as Error).message) || e}).`, dim: true });
-          throw e; // let the kernel keep the registration so a later spawn can retry
+          // Rethrow so the kernel keeps the registration (a later spawn retries) and
+          // prints this message in the invoking terminal. The build hint is for this
+          // repo's dev server only: an embedder's users have no such script.
+          if (e instanceof VendorAssetMissing) {
+            const hint = import.meta.env && import.meta.env.DEV
+              ? ` Build it with \`npm run vendor:${label}\` from the repo root, or start the studio with \`npm run dev\` there.`
+              : "";
+            throw new Error(`not available: ${e.message}.${hint}`);
+          }
+          throw e;
         }
       },
       notice,

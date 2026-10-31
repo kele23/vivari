@@ -359,7 +359,25 @@ export class KernelBridge {
       const scheme = typeof location !== "undefined" ? location.protocol : "https:";
       return `${scheme}//${this.previewToken}--${port}${this.wildcardSuffix}${p}`;
     }
+    if (this.previewMode === "same-origin") return this.sameOriginPreviewUrl(port, p);
     return `${this.previewOrigin ?? ""}/preview/${port}${p}`;
+  }
+
+  /**
+   * A `/preview/<port>/…` URL on THIS origin, carrying this kernel's token. Several
+   * Studio tabs on one origin share one Service Worker, and their dev servers can bind
+   * the same port, so the path alone does not say which tab a preview belongs to. The
+   * SW maps the token (announced with `vv-kernel-host`) to this tab, and on a
+   * navigation redirects to the URL without it, so the app never sees the token.
+   * Used by mode A and by same-origin pop-outs in mode B.
+   */
+  sameOriginPreviewUrl(port: number, pathAndQuery = "/"): string {
+    const p = pathAndQuery.startsWith("/") ? pathAndQuery : "/" + pathAndQuery;
+    const hash = p.indexOf("#");
+    const head = hash === -1 ? p : p.slice(0, hash);
+    const tail = hash === -1 ? "" : p.slice(hash);
+    const sep = head.includes("?") ? "&" : "?";
+    return `/preview/${port}${head}${sep}${PREVIEW_KERNEL_PARAM}=${this.previewToken}${tail}`;
   }
 
   /** Everything after the `<token>--<port>` label: `[-<tag>].<domain>` (mode C). */
@@ -610,10 +628,16 @@ export class KernelBridge {
    */
   announceKernelHost(): void {
     if (typeof navigator === "undefined" || !("serviceWorker" in navigator)) return;
+    // `token` lets the SW tell this tab's previews from another tab's (see
+    // sameOriginPreviewUrl).
     navigator.serviceWorker.controller?.postMessage(
       this.documentIsolationPolicy === undefined
-        ? { type: "vv-kernel-host" }
-        : { type: "vv-kernel-host", documentIsolationPolicy: this.documentIsolationPolicy },
+        ? { type: "vv-kernel-host", token: this.previewToken }
+        : {
+            type: "vv-kernel-host",
+            token: this.previewToken,
+            documentIsolationPolicy: this.documentIsolationPolicy,
+          },
     );
   }
 
@@ -722,6 +746,9 @@ function normalizeDomain(raw: string | undefined): string | undefined {
   d = d.replace(/^\/+|\/+$/g, "").replace(/\/.*$/, "");
   return /^[a-z0-9.-]+\.[a-z]{2,}$/.test(d) ? d : undefined;
 }
+
+// The query parameter sameOriginPreviewUrl adds; sw.js's KERNEL_PARAM must match.
+const PREVIEW_KERNEL_PARAM = "__vv_kernel";
 
 // Short, unguessable, per-boot token (base36, ~6 chars). Ties preview hostnames to
 // this session so URLs aren't enumerable and rotate each boot. It's not a security

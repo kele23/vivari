@@ -11782,3 +11782,60 @@ lock and mid-write checks fail (3); with the follow-up, all pass.
 Not done: `vv-depcache/`'s index is one blob with the same shape of race. Two tabs installing
 at once can lose one snapshot's index entry (the blob stays). That costs a reinstall, not a
 broken tree.
+
+## Two Studio tabs on one origin get their own previews (PR #23 + follow-up)
+
+kele23 found that with two Studio tabs on one origin, both running a dev server on 5173,
+the SW sent every `/preview/5173/` request to whichever kernel window it found first:
+reloading tab A's preview painted tab B's app. PR #23 routed by the requesting client
+(the window that started a navigation, the frame for its subresources), tracked keep-prefix
+ports per tab, and kept ws/SSE frames with their own tab.
+
+The follow-up measured the assumption under it in Chrome 156 with a logging SW, and it does
+not hold for the first load: an iframe whose parent sets `src`, an iframe created with
+`src`, and a fresh top-level tab all navigate with an empty `clientId`. So every preview's
+first load still went to the first kernel window, and the guess was recorded for the frame.
+Reproduced with the real `sw.js` and two real tabs: on #23 as merged, tab A's preview was
+served by tab B.
+
+Fix: the bridge adds its per-boot token (the same one mode C uses in hostnames) to
+same-origin preview URLs as `__vv_kernel` and announces it with `vv-kernel-host`. The SW
+records the frame against the token's tab and redirects to the clean URL; Chrome keeps the
+`resultingClientId` across that redirect, so the document, its subresources and a reload
+from inside all reach the right tab, and the app never sees the token. A same-origin
+pop-out carries the token too and stayed on its tab across a reload. The routing maps are
+now pruned of clients that are gone.
+
+Gates: `spike-sw-multitab.mjs` (new, offline): two fake kernel windows with the second
+listed first, so only real routing can reach the first. On #23 as merged, 13 of its checks
+fail. `spike-sw-routing.mjs` was failing on #23 (its `handlePreview` stub expected a string
+path) and is fixed. Checked by hand in headless Chrome with the real `sw.js`: both tabs'
+iframes, subresources, in-frame reloads and a pop-out reload are served by their own tab.
+
+Not done: a revived SW loses the token map and falls back to the heuristic until the next
+tokened navigation. An SDK embedder that builds preview URLs by hand instead of through
+`previewUrlFor` gets no token.
+
+## `sh: npm: not found` after "Reset everything" (this change)
+
+Reported: reset everything, reload, pick the React TypeScript template, and the terminal
+printed `Downloading npm on first use…` then `sh: npm: not found`. The studio was running
+from `bun dev` inside `packages/studio`, which never ran the root `predev`, so there was no
+`public/vendor/` at all. It had worked until then because OPFS still held an npm tree an
+earlier session unpacked, and the reset removed it.
+
+Three things made it worse than a missing file:
+
+- Vite's dev server answers a missing `public/` file with `200 text/html` (its
+  `index.html`), so the loader got a web page, not a 404.
+- `fetchVendorAsset` returned `null` on a 404 and the loader treated that as a finished load,
+  so `npm` was unregistered and stayed missing until a reload even after the asset was built.
+- The only explanation went to the browser console; the terminal said `not found`.
+
+Fixes: `packages/studio` gets a `predev` that runs the root one (and the root `dev` calls
+vite directly so the producers do not run twice); `fetchVendorAsset` throws on a 404 or an
+HTML page; `ensureCommandLoaded` prints the reason in the invoking terminal and keeps the
+registration. Checked against the running dev server in headless Chrome: with the asset
+missing the terminal names it and how to build it, and after building it the next `npm` in
+the same page loads the real CLI. Gate: two sections in `spike-install-latency.mjs`; with the
+old code 5 of their 10 checks fail.

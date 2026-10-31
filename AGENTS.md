@@ -513,6 +513,25 @@ install, and the two headline optimisations were invisible to anyone verifying l
 user lost an afternoon concluding the change did nothing. `spike-install-latency.mjs` now
 diffs all three lists against the declared `vendor:*` scripts.
 
+**`bun run dev` from `packages/studio` is a fourth door, and it skipped all three.** The
+studio README offers it, and it ran plain `vite`: no root `predev`, so no
+`public/vendor/` at all. It still looked fine for as long as OPFS held a tree an earlier
+session had unpacked; after "Reset everything" the first project printed
+`Downloading npm on first use…` and then `sh: npm: not found`. Two fixes, and the second
+matters beyond this repo:
+
+- `packages/studio` has a `predev` that runs the root `predev`, so both doors build the
+  assets. The root `dev` calls `bun run vite` directly, because going through the studio's
+  `dev` script would run every producer twice. `cloudflare-build.sh` relies on the studio's
+  `bun run build` NOT running vendor hooks, which is why there is no studio `prebuild`.
+- A missing asset is now an error that reaches the terminal. Vite's dev server answers a
+  missing `public/` file with `200 text/html` (its `index.html`), so the loader was handed a
+  web page; and `fetchVendorAsset` returned `null` on a 404, which counted as a finished
+  load and unregistered `npm` until a reload, even once the asset existed. It now throws on
+  both shapes, the kernel prints the reason in the terminal that ran the command (with a
+  build hint only under `import.meta.env.DEV`, since an embedder's users have no such
+  script), and the next spawn retries.
+
 Keeping them on `predev` is cheap for the same reason it is for the other eight: every
 vendor script reuses an existing asset unless `--force`. Re-measured at 59 locks with both
 producers run back to back the way `predev` runs them, after the asset-integrity check was
@@ -1718,6 +1737,33 @@ failed under cross-origin isolation; treat `fetch(event.request)` as unreliable,
 as the default.
 
 `scripts/spike-sw-routing.mjs` drives the real `sw.js` under `vm` and gates all of it.
+
+### A frame's first navigation has no `clientId`, so the preview URL names its tab
+Two Studio tabs on one origin share one SW, and both dev servers can bind 5173, so the SW
+has to work out which tab a `/preview/5173/` request belongs to. #23 used the requesting
+client, on the assumption that a navigation's `clientId` is the window that started it.
+**It is not, for the load that matters.** Measured in Chrome 156: an iframe whose parent
+sets `src` navigates with `clientId === ""`, and so does an iframe created with `src` and a
+fresh top-level tab. Only later navigations of the same frame name something: a reload
+from inside names the old document, a new `src` the document it replaces. So every
+preview's first load fell back to "the first kernel window", and that guess was then
+recorded for the frame, so its subresources and reloads followed it. With the second tab
+listed first, tab A's preview showed tab B's app, in real Chrome, every time.
+
+The fix carries identity in the URL: `sameOriginPreviewUrl` adds `__vv_kernel=<token>`,
+`vv-kernel-host` announces the same token, and the SW records the frame and 302s to the
+clean URL (the redirect keeps `resultingClientId`, measured). Rules:
+
+- **Build same-origin preview URLs with `sameOriginPreviewUrl` / `previewUrlFor`**, never
+  by hand. A hand-built `/preview/<port>/` works with one tab and silently routes to the
+  wrong one with two. `openExternalPreview` was the one hand-built case.
+- **The SW strips the token before the app or the VM sees it.** If you add a code path
+  that reads a preview URL (address bar sync, DevTools target matching), drop
+  `__vv_kernel` there too; `syncTabLocation` does.
+- **Node cannot tell you what `clientId` a browser sends.** `spike-sw-multitab.mjs` feeds
+  the SW the values Chrome was measured to send; if a browser changes them, only a real
+  browser shows it. The probe that measured them is a page with a logging SW and two
+  iframes, run in headless Chrome over CDP.
 
 ### A hard-reloaded page is uncontrolled, and `activate` will not claim it
 Shift+Reload bypasses the SW for that load, and the SW only called `clients.claim()` in

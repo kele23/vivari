@@ -25,7 +25,7 @@
     "vendor:locks": "node scripts/gen-template-locks.mjs",
     "vendor:depcache": "node scripts/gen-depcache.mjs",
     "predev": "npm run vendor:npm && npm run vendor:yarn && npm run vendor:pnpm && npm run vendor:corepack && npm run vendor:tsgo && npm run vendor:pyodide && npm run vendor:ruff && npm run vendor:sqlite && npm run vendor:locks && npm run vendor:depcache",
-    "dev": "cd packages/studio && bun run dev",
+    "dev": "cd packages/studio && bun run vite",
     "prebuild:studio": "npm run vendor:npm && npm run vendor:yarn && npm run vendor:pnpm && npm run vendor:corepack && npm run vendor:tsgo && npm run vendor:pyodide && npm run vendor:ruff && npm run vendor:sqlite && npm run vendor:locks && npm run vendor:depcache",
     "build:studio": "cd packages/studio && bun run build",
     "preview:studio": "cd packages/studio && bun run preview",

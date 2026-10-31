@@ -381,6 +381,7 @@ export class Kernel {
     const loader = this.lazyLoaders.get(command);
     if (!loader) return; // not lazy (or already loaded) — nothing to do
     let inflight = this.lazyInflight.get(loader);
+    const initiated = !inflight;
     if (!inflight) {
       // We're initiating the load — announce it to the invoking terminal (dim), so
       // the first `tsc`/`yarn`/… doesn't look like a frozen prompt while it downloads.
@@ -401,8 +402,14 @@ export class Kernel {
           this.lazyNotices.delete(name);
         }
       }
-    } catch {
-      /* loader threw — leave the registration so a later spawn can retry */
+    } catch (err) {
+      // Leave the registration so a later spawn can retry. Say why in the terminal
+      // that asked: the spawn goes on to fail as `sh: <cmd>: not found`, which names
+      // neither the download nor the reason it failed.
+      if (initiated && pid != null) {
+        const why = (err && err.message) || String(err);
+        try { this.stderr("\x1b[31m" + command + ": " + why + "\x1b[0m\r\n", pid); } catch { /* sink gone */ }
+      }
     } finally {
       this.lazyInflight.delete(loader);
     }

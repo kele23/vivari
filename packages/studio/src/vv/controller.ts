@@ -3197,8 +3197,12 @@ export class IdeController {
       window.open(this.bridge.previewUrlFor(port, "/"), "_blank");
       return;
     }
-    const base = this.popoutIsolated ? this.bridge.previewBase : "";
-    window.open(`${base}/preview/${port}/`, "_blank");
+    // Same-origin pop-outs carry the kernel token like the in-app frame, so a second
+    // Studio tab on this origin cannot answer for them (bridge.sameOriginPreviewUrl).
+    const url = this.popoutIsolated
+      ? `${this.bridge.previewBase}/preview/${port}/`
+      : this.bridge.sameOriginPreviewUrl(port, "/");
+    window.open(url, "_blank");
   }
 
   // Relay an inbound ws/SSE frame to any preview opened in its OWN tab. Those tabs
@@ -3322,10 +3326,14 @@ export class IdeController {
     const tab = this.snap.previewTabs.find((t) => t.id === id);
     if (!tab || tab.port == null) return;
     // The preview iframe lives at /preview/<port>/… — strip that proxy prefix and
-    // our own cache-bust to recover the in-server path.
+    // our own cache-bust and kernel token to recover the in-server path. The SW
+    // redirects the token away before the app loads, so it is only here if that
+    // redirect did not happen.
     const m = href.match(/^\/preview\/\d+(\/.*)?$/);
     let path = m ? m[1] || "/" : href.startsWith("/") ? href : "/" + href;
-    path = path.replace(/([?&])t=\d+(&|$)/, (_all, p1: string, p2: string) => (p2 === "&" ? p1 : "")).replace(/[?&]$/, "");
+    const drop = (p: string, re: RegExp) =>
+      p.replace(re, (_all, p1: string, p2: string) => (p2 === "&" ? p1 : "")).replace(/[?&]$/, "");
+    path = drop(drop(path, /([?&])t=\d+(&|$)/), /([?&])__vv_kernel=[^&#]*(&|$)/);
     this.setTab(id, { url: `localhost:${tab.port}${path && path !== "/" ? path : ""}` });
   }
 

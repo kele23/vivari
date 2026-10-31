@@ -182,6 +182,9 @@ const SPIKES = [
   // app and to Chrome, i.e. to every environment CI has. sw.js is a classic
   // script with no imports, so it runs under `vm` with a stub `self`.
   { name: "sw-routing", file: "spike-sw-routing.mjs", net: false, timeout: 60000 },
+  // Two Studio tabs on one origin: each tab's previews are served by that tab, through
+  // the kernel token in the preview URL. The real sw.js under `vm`, like sw-routing.
+  { name: "sw-multitab", file: "spike-sw-multitab.mjs", net: false, timeout: 60000 },
   // Static for the same reason: Document-Isolation-Policy is Chromium-only and nothing
   // in CI runs a browser. The SW's mirroring runs under `vm` like sw-routing.
   { name: "sw-isolation-policy", file: "spike-sw-isolation-policy.mjs", net: false, timeout: 60000 },

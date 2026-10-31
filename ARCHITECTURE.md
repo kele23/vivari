@@ -783,6 +783,28 @@ a same-origin host. No DIP on the host means none on the preview, and a preview 
 a cross-origin IDE (modes B/C) gets none: it is cross-origin to the IDE anyway and keeps
 its `COEP: credentialless`. `scripts/spike-sw-isolation-policy.mjs` gates it.
 
+**Several Studio tabs, one SW: each preview goes to its own tab.** In mode A every tab
+on the origin has its own kernel but shares the one Service Worker, and their dev servers
+can bind the same in-VM port, so `/preview/5173/` alone does not say which tab should
+answer. The SW keeps `frameKernel` (frame client id → kernel host client id): a
+subresource names its frame (`clientId`), and a later navigation of a frame names the
+document it replaces. The first navigation of a frame names nothing: measured in Chrome
+156, an iframe whose parent sets `src` (how `PreviewFrame` loads every preview) and a
+fresh top-level tab both navigate with an empty `clientId`. So the bridge adds its
+per-boot token to same-origin preview URLs (`__vv_kernel`, built by
+`sameOriginPreviewUrl`) and sends the same token with `vv-kernel-host`. On a navigation
+the SW records the frame (`resultingClientId`) against the token's tab and answers with a
+302 to the URL without the token; the redirected navigation keeps the same
+`resultingClientId`, so it is routed by the record and the app never sees the token. A
+non-navigation carrying the token is routed by it and served with the token stripped.
+Keep-prefix ports are tracked per tab (`keepPrefixByClient`) and decided after routing,
+and outbound ws/SSE frames go to the frame's own tab. All of it is in memory: a revived SW
+falls back to the first-kernel-window heuristic until the next tokened navigation, and
+`pruneRouting` drops entries for clients that are gone (a frame keeps a 60 s grace period,
+since it is recorded before its document exists). Modes B and C do not need this: mode B's
+preview origin routes over its single kernel port, and mode C gives each kernel its own
+origins. `scripts/spike-sw-multitab.mjs` gates it.
+
 **Preview iframes start at about:blank, then navigate.** On a fresh page load the
 studio document is fetched before the SW takes control, so a brand-new iframe whose
 *first* navigation is a direct `/preview/<port>/` URL isn't intercepted — the
@@ -2454,8 +2476,9 @@ run script in the studio's origin, which is the origin holding the kernel bridge
 
 ## 10. Build & run
 
-- **Dev (studio, default)**: `npm run dev` → `cd packages/studio && bun run dev`
-  (Vite, default `:5173`). `vite.config.ts` sends COOP/COEP on the dev + preview
+- **Dev (studio, default)**: `npm run dev` → root `predev` (the vendor producers), then
+  `cd packages/studio && bun run vite` (Vite, default `:5173`). `bun run dev` from
+  `packages/studio` gets the same assets: its `predev` runs the root one. `vite.config.ts` sends COOP/COEP on the dev + preview
   servers, stamps `Service-Worker-Allowed: /` on `/sw.js`, sets `worker.format:'es'`,
   and widens `server.fs.allow` to the repo root so it can read the sibling worker/wasm
   sources. Vite bundles the kernel worker AND — recursively — its nested module

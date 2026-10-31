@@ -112,6 +112,53 @@ console.log("== the deploy builds every vendor asset the studio expects ==");
 }
 
 // ---------------------------------------------------------------------------
+console.log("\n== `bun dev` from packages/studio builds the vendor assets too ==");
+// ---------------------------------------------------------------------------
+{
+  // The studio README offers `bun run dev` from packages/studio, and that skipped the
+  // root predev entirely: no public/vendor at all, and after "Reset everything" the
+  // terminal said `sh: npm: not found`. The studio's own predev runs the root list,
+  // and the root `dev` calls vite directly so the producers do not run twice.
+  const studio = JSON.parse(read("packages/studio/package.json"));
+  ok(/^cd \.\.\/\.\. && npm run predev$/.test(studio.scripts.predev || ""), `packages/studio predev runs the root predev (${studio.scripts.predev})`);
+  ok(!/\brun dev\b/.test(pkg.scripts.dev), `the root dev does not go through the studio's dev script, which would run predev twice (${pkg.scripts.dev})`);
+}
+
+// ---------------------------------------------------------------------------
+console.log("\n== a lazy tool that fails to load says why, and can be retried ==");
+// ---------------------------------------------------------------------------
+{
+  // ensureCommandLoaded over a bare `this`: no kernel, no Wasm.
+  const { Kernel } = await import("../packages/kernel-host/kernel.js");
+  const host = { lazyLoaders: new Map(), lazyNotices: new Map(), lazyInflight: new Map(), out: [] };
+  host.stderr = (s, pid) => host.out.push({ s, pid });
+  const load = (cmd, pid) => Kernel.prototype.ensureCommandLoaded.call(host, cmd, pid);
+  let fail = true;
+  const loader = async () => {
+    if (fail) throw new Error("not available: vendor/npm-pack.bin is not served here (HTTP 404)");
+  };
+  Kernel.prototype.registerLazyProgram.call(host, ["npm", "npx"], loader, "Downloading npm on first use…");
+
+  await load("npm", 7);
+  const text = host.out.map((o) => o.s).join("");
+  ok(text.includes("Downloading npm on first use"), "the notice is printed when the load starts");
+  ok(text.includes("npm: not available: vendor/npm-pack.bin is not served here (HTTP 404)"), "…and the reason is printed when it fails");
+  ok(host.out.every((o) => o.pid === 7), "…both in the terminal that asked");
+  ok(host.lazyLoaders.has("npm") && host.lazyLoaders.has("npx"), "a failed load stays registered");
+
+  fail = false; // the asset gets built while the page stays open
+  host.out.length = 0;
+  await load("npm", 7);
+  ok(!host.lazyLoaders.has("npm") && !host.lazyLoaders.has("npx"), "…so the next spawn retries, and a success unregisters both names");
+  ok(!host.out.some((o) => o.s.includes("not available")), "…without an error line");
+
+  // The worker side: a missing asset must throw (not return null, which counted as a
+  // finished load), and a 200 HTML page counts as missing.
+  ok(/if \(!r\.ok \|\| html\)\s*\{\s*throw new VendorAssetMissing/.test(worker), "fetchVendorAsset throws on a 404 or an HTML page");
+  ok(/content-type[^\n]*text\/html/.test(worker), "…and recognises the HTML page by its content-type");
+}
+
+// ---------------------------------------------------------------------------
 console.log("\n== the template loader survives a Node that does not strip types ==");
 // ---------------------------------------------------------------------------
 // Thirteen scripts read the studio's templates by importing a .ts file, and two
