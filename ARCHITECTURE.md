@@ -183,8 +183,18 @@ repeatedly:
 Opcodes split into two families (`isFsOpcode`):
 
 - **Filesystem** (`OP_READ_FILE`…`OP_READLINK`, `OP_OPEN`…`OP_FTRUNCATE`,
-  `OP_WATCH`/`OP_UNWATCH`) → serviced by the **File System Worker** over the
-  process's SAB, woken via the fs `MessagePort` doorbell.
+  `OP_WATCH`/`OP_UNWATCH`, `OP_CHMOD`…`OP_FILE_LOCK`) → serviced by the **File System
+  Worker** over the process's SAB, woken via the fs `MessagePort` doorbell.
+
+`OP_FILE_LOCK` is the one fs opcode with no file behind it: an advisory lock table
+(`kernel-host/file-locks.js`) with SQLite's five levels, which the SQLite VFS under
+`bun:sqlite` and `node:sqlite` takes before it reads or writes a database. It lives in the
+File System Worker because that thread already services every process's fs traffic one
+request at a time, so the table needs no locking of its own, and because it is told when a
+process goes away (`fs-unregister`), which is where a killed process's locks are dropped.
+It never blocks: an acquire that cannot be granted answers with the level the caller
+holds, and SQLite's busy handler waits in the caller's own thread (`xSleep` parks on
+`Atomics.wait`).
 - **Everything else** (`OP_SPAWN`/`OP_SPAWN_ASYNC`/`OP_KILL`, `OP_LISTEN`/
   `OP_ACCEPT`/`OP_RESPOND`/`OP_CLOSE_SERVER`, `OP_FETCH`/`OP_FETCH_ASYNC`) →
   serviced by the **Kernel**, woken via a `send("syscall")` postMessage.
@@ -1654,6 +1664,18 @@ pieces are always on PATH (in `COREUTILS`), not lazily unpacked:
   on a browser MAIN thread, so `parkFor` reports whether it could park and the spin remains as a
   documented fallback rather than becoming a throw in a context that used to work. Argument
   handling is Bun's, including the i32 coercion and the throw on a negative duration.
+- `packages/runtime/node/bindings/sqlite.js` — **`node:sqlite`** (`DatabaseSync`,
+  `StatementSync`), as `internalBinding('sqlite')` behind a one-line `lib/sqlite.js`, the way
+  Node has it. Same engine and VFS as `bun:sqlite` below, and **one engine per process**: the
+  runtime builds a single SQLite host (`createVivariSqliteHost`, with the lock table) and
+  hands it to both. The API rules are Node's, measured against a real `node:sqlite` by
+  `spike-node-sqlite.mjs`, and several are the opposite of Bun's (numbers bind as doubles, a
+  2^53+ integer throws `ERR_OUT_OF_RANGE` instead of truncating, rows have a null prototype).
+  Reachable only as `node:sqlite`: the bare `sqlite` is an npm package, so the loader keeps a
+  `PREFIX_ONLY` set and `Module.builtinModules` lists it as `node:sqlite`, as Node does.
+  Extensions, sessions, `backup()` and `setAuthorizer()` throw, naming why. WAL is answered
+  truthfully (`delete`) without the warning `bun:sqlite` prints, because pnpm asks for it on
+  every connection of every install.
 - `packages/runtime/builtins/bun-sqlite.js` — **`bun:sqlite`, on real SQLite**. This is the one
   Bun module that could not be shimmed over an existing Node API: there is no SQLite in the
   runtime to delegate to, and `bun:sqlite` is a **synchronous** API (`db.query(sql).all()`
@@ -1688,10 +1710,13 @@ pieces are always on PATH (in `COREUTILS`), not lazily unpacked:
   - **Three honest limits, each a sandbox fact rather than a shortcut.** `xSync` is a no-op
     because the runtime's `fsync`/`fdatasync` are (§4) — the rollback journal is still written
     and replayed, so a crash mid-transaction recovers, but power loss is not survivable the way
-    real SQLite promises. There is **no file locking**, so concurrent writers from two processes
-    can corrupt a database; this matches what upstream ships rather than being a Vivari
-    compromise — the official build's default VFS is literally `unix-none`, SQLite's lock-free
-    one. And `journal_mode = WAL` needs shared memory across processes, so it is declined with a
+    real SQLite promises. **Locking is real** between SQLite connections: `xLock`/`xUnlock`/
+    `xCheckReservedLock` go to `OP_FILE_LOCK` (§4.2), so two processes writing one database
+    serialise the way SQLite intends. It used to be a no-op, matching the official build's
+    lock-free `unix-none` default, until pnpm 11 put its store index in SQLite and opened it
+    from the CLI and every worker thread at once; without the table the second writer silently
+    lost the first one's rows. A host with no lock table (the offline tier over `node:fs`)
+    keeps the no-op. And `journal_mode = WAL` needs shared memory across processes, so it is declined with a
     one-time warning and SQLite stays in `delete` mode, which is SQLite's own documented
     behaviour when a VFS cannot do WAL. ORMs that set WAL opportunistically therefore keep
     working instead of failing to open.

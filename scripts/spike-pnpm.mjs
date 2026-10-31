@@ -26,7 +26,7 @@ import path from "node:path";
 
 const VENDOR_PNPM = process.argv[2] || "/tmp/vv-vendor-pnpm/node_modules/pnpm";
 const VFS_PNPM = "/usr/lib/node_modules/pnpm";
-const PNPM_VERSION = "9.15.9";
+const PNPM_VERSION = process.env.VV_PNPM_VERSION || "9.15.9";
 const LARGE_THRESHOLD = 512 * 1024;
 
 if (!fs.existsSync(path.join(VENDOR_PNPM, "bin/pnpm.cjs"))) {
@@ -114,6 +114,15 @@ console.log(`Loaded real pnpm into VFS: ${fileCount} files at ${VFS_PNPM} (${Dat
 
 kernel.mkdirp("/home/user");
 kernel.mkdirp("/tmp/.pnpm-store");
+// pnpm 11 keeps its store index in SQLite through node:sqlite. The browser kernel
+// points every process at the vendored engine with VV_SQLITE_WASM_URL; with no HTTP
+// server here, the engine goes into the VFS and VV_SQLITE_WASM_PATH points at it.
+const SQLITE_ENGINE_VFS = "/usr/lib/vivari/sqlite3.wasm";
+kernel.mkdirp("/usr/lib/vivari");
+await kernelFs.fs.writeLarge(
+  SQLITE_ENGINE_VFS,
+  new Uint8Array(fs.readFileSync(new URL("../packages/runtime/vendor/sqlite/sqlite3.wasm", import.meta.url))),
+);
 kernel.mkdirp("/app");
 
 kernel.writeFile(
@@ -144,6 +153,7 @@ const env = {
   XDG_CACHE_HOME: "/home/user/.cache",
   XDG_STATE_HOME: "/home/user/.local/state",
   XDG_CONFIG_HOME: "/home/user/.config",
+  VV_SQLITE_WASM_PATH: SQLITE_ENGINE_VFS,
 };
 // No hardlink/reflink CoW in our VFS → copy. Explicit store dir. Quiet-ish.
 const PNPM_FLAGS = [

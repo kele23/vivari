@@ -47,6 +47,7 @@ import {
   OP_UTIMES,
   OP_FCHMOD,
   OP_FUTIMES,
+  OP_FILE_LOCK,
   OP_OPEN,
   OP_CLOSE,
   OP_FD_READ,
@@ -56,6 +57,7 @@ import {
   OP_WATCH,
   OP_UNWATCH,
 } from "../protocol/syscall.js";
+import { FileLocks, serviceFileLock } from "./file-locks.js";
 
 const EMPTY = new Uint8Array(0);
 
@@ -124,6 +126,10 @@ export class FsServer {
     // nothing, and a mutation under an unwatched top-level dir is ~O(1).
     this.watches = new Map();
     this.watchesByTop = new Map(); // top segment -> Map<key, watch>
+    // SQLite's advisory locks (OP_FILE_LOCK). Here because this thread services
+    // every process's fs traffic one request at a time, so the table is atomic
+    // without any locking of its own — see file-locks.js.
+    this.fileLocks = new FileLocks();
   }
 
   // Could a mutation at `path` reach any watcher? Cheap gate for the exists()
@@ -151,6 +157,9 @@ export class FsServer {
 
   unregister(clientId) {
     this.clients.delete(clientId);
+    // A process that dies mid-transaction must not leave its database locked for
+    // every process after it. A clean exit has already released them.
+    this.fileLocks.releaseClient(clientId);
     // Drop any watches this client still held (its process is gone).
     if (this.watches.size) {
       for (const [key, w] of this.watches) {
@@ -477,6 +486,17 @@ export class FsServer {
         }
         return EMPTY;
       }
+      case OP_FILE_LOCK:
+        return u32ToBytes(
+          serviceFileLock(
+            this.fileLocks,
+            clientId,
+            s(0),
+            bytesToU32(fields[1]),
+            bytesToU32(fields[2]),
+            bytesToU32(fields[3]),
+          ),
+        );
       case OP_WATCH: {
         const watchId = bytesToU32(fields[0]);
         const path = s(1);

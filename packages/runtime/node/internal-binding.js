@@ -15,6 +15,7 @@ import { createBlockListBindings } from "./bindings/block-list.js";
 import { createHttpParserBinding } from "./bindings/http_parser.js";
 import { createZlibBinding, ZLIB_CONSTANTS } from "./bindings/zlib.js";
 import { createCryptoBinding } from "./bindings/crypto.js";
+import { createSqliteBinding } from "./bindings/sqlite.js";
 import { OS_SIGNALS, OS_ERRNO, OS_PRIORITY, OS_DLOPEN, UV_UDP_REUSEADDR, FS_CONSTANTS, CRYPTO_CONSTANTS } from "./bindings/constants.js";
 import { captureCallSites } from "../error-stack.js";
 
@@ -36,7 +37,7 @@ function getOwnNonIndexProperties(obj, filter) {
   return out;
 }
 
-export function createInternalBinding({ syscalls, process, netLiveness, netServers, codec, cryptoCodec, hostAsyncHooks, pipeBridge, queueClose } = {}) {
+export function createInternalBinding({ syscalls, process, netLiveness, netServers, codec, cryptoCodec, hostAsyncHooks, pipeBridge, queueClose, sqliteHost } = {}) {
   // net (Phase 2 #7/#8): tcp_wrap/stream_wrap/uv/pipe_wrap/cares_wrap for the
   // in-process loopback beneath Node's real lib/net.js. Needs process.nextTick.
   // `syscalls` lets listen() register the port with the kernel (external routing,
@@ -145,6 +146,23 @@ export function createInternalBinding({ syscalls, process, netLiveness, netServe
       zlib: ZLIB_CONSTANTS,
     },
   };
+  // sqlite: node:sqlite over the wasm SQLite bun:sqlite also uses. A getter, so a
+  // process that never requires node:sqlite never builds it; the engine itself loads
+  // later still, on the first database opened. `sqliteHost` is a factory for the same
+  // reason (index.js builds the host after this binding table exists).
+  let sqliteBinding = null;
+  Object.defineProperty(bindings, "sqlite", {
+    enumerable: true,
+    get() {
+      if (!sqliteBinding) {
+        if (typeof sqliteHost !== "function") {
+          throw new Error("Vivari: internalBinding('sqlite') needs a SQLite host, and this runtime was built without one");
+        }
+        sqliteBinding = createSqliteBinding(sqliteHost);
+      }
+      return sqliteBinding;
+    },
+  });
 
   return function internalBinding(name) {
     if (Object.prototype.hasOwnProperty.call(bindings, name)) return bindings[name];

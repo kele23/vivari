@@ -951,7 +951,9 @@ export function createModuleSystem({ fs, path, builtins, process, globals, nodeM
   Module.isBuiltin = (request) => {
     if (typeof request !== "string") return false;
     const name = request.startsWith("node:") ? request.slice(5) : request;
-    return hasBuiltin(name) || hasBuiltin("node:" + name) || hasLazyBuiltin(name);
+    // The lazy check gets the request as written: `node:sqlite` is a builtin and the
+    // bare `sqlite` is an npm package (see PREFIX_ONLY in node/loader.js).
+    return hasBuiltin(name) || hasBuiltin("node:" + name) || hasLazyBuiltin(request);
   };
 
   // syncBuiltinESMExports is a no-op for us (no separate ESM builtin namespace to

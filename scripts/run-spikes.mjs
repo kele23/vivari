@@ -235,6 +235,11 @@ const SPIKES = [
   // with no kernel/wasm, so this runs in the Wasm-free toolchain-gate.
   { name: "bun-offline", file: "spike-bun-offline.mjs", net: false, timeout: 60000 },
   { name: "html-rewriter", file: "spike-html-rewriter.mjs", net: false, timeout: 60000 },
+  // node:sqlite against the host's real node:sqlite (the oracle), the FS worker's
+  // SQLite lock table, and two connections in two "processes" sharing one database.
+  // The engine is the committed sqlite3.wasm and the fs is node:fs: no kernel, no
+  // VFS crate, so it runs in the Wasm-free toolchain-gate on every PR.
+  { name: "node-sqlite", file: "spike-node-sqlite.mjs", net: false, timeout: 60000 },
   // Python (pure-JS tier): the python/gunicorn/uvicorn/flask argv seams run as
   // real Node subprocesses, CPython-faithful SystemExit, the generated bridge
   // dispatch source, and template-registry integrity. Pyodide itself is neither
@@ -275,6 +280,11 @@ const SPIKES = [
   // fs.cpSync / fsPromises.cp against the host's real Node, case by case. Needs the
   // VFS (it copies real trees), so needsWasm; the host half runs as a child process.
   { name: "fs-cp", file: "spike-fs-cp.mjs", net: false, needsWasm: true, timeout: 120000 },
+  // node:sqlite inside real guest processes: `node:sqlite` resolving and bare `sqlite`
+  // not, a database that is a file in the Rust VFS, OP_FILE_LOCK over the syscall
+  // bridge (a writer waits for another process, a killed process's lock is released),
+  // and four writers at once ending with every row and a clean integrity_check.
+  { name: "node-sqlite-vm", file: "spike-node-sqlite-vm.mjs", net: false, needsWasm: true, timeout: 180000 },
   { name: "fs-errors", file: "spike-fs-errors.mjs", net: false, needsWasm: true, timeout: 120000 },
   // The HOST fs surface against the 1 MiB shared window: `fs.writeFile` and
   // `fs.readFile` hand over whole files, unlike a process's syscalls, which are

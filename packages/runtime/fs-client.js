@@ -40,6 +40,7 @@ import {
   OP_UTIMES,
   OP_FCHMOD,
   OP_FUTIMES,
+  OP_FILE_LOCK,
   OP_OPEN,
   OP_CLOSE,
   OP_FD_READ,
@@ -170,6 +171,12 @@ export function createSyscalls({ ctrl, data, notify, onSignal = null }) {
     futimes: (fd, atimeMs, mtimeMs) =>
       call(OP_FUTIMES, encodeRequest([u32ToBytes(fd), f64ToBytes(atimeMs), f64ToBytes(mtimeMs)])),
     ftruncate: (fd, len) => call(OP_FTRUNCATE, encodeRequest([u32ToBytes(fd), u32ToBytes(len)])),
+    // SQLite's advisory locks (see OP_FILE_LOCK). Not part of any Node API: only the
+    // SQLite VFS under bun:sqlite and node:sqlite asks for them.
+    fileLock: (path, owner, op, level) =>
+      bytesToU32(
+        call(OP_FILE_LOCK, encodeRequest([b(path), u32ToBytes(owner), u32ToBytes(op), u32ToBytes(level)])),
+      ),
 
     // ---- file watching (roadmap #19 stage B) ----
     // Register interest in `path` with the File System Worker; change events are

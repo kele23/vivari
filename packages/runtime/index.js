@@ -15,6 +15,7 @@ import { createWebSocket } from "./websocket.js";
 import { rewriteDynamicImportToGlobal } from "./esm.js";
 import { isEsbuildInprocActive, esbuildWasmBytes } from "./esbuild-inproc-patch.js";
 import { createBunRuntime } from "./builtins/bun.js";
+import { createVivariSqliteHost } from "./builtins/bun-sqlite.js";
 import {
   IPC_PATH_ENV,
   IPC_MODE_ENV,
@@ -479,7 +480,20 @@ export function createRuntime({
   // `wake` to nudge the loop when inbound bytes arrive; it publishes `dispatch` so
   // kernel-delivered pipe messages route back into the binding. See bindings/net.js.
   const pipeBridge = { postRaw, wake: loop.wakeNet, dispatch: null };
-  const nodeModules = createNodeModules({ process, syscalls, netLiveness, netServers, codec, cryptoCodec, hostAsyncHooks, pipeBridge, queueClose: loop.queueClose });
+  // The SQLite host behind BOTH node:sqlite and bun:sqlite: where the engine comes
+  // from, which fs its VFS talks to, and the FS worker's lock table. One per process,
+  // so the two modules share one wasm engine. Built on first use, by which point the
+  // requires it closes over (declared further down) exist.
+  let sqliteHost = null;
+  const getSqliteHost = () =>
+    sqliteHost ||
+    (sqliteHost = createVivariSqliteHost({
+      require: vvRootRequire,
+      makeCwdRequire: () => moduleSystem.makeRequire(process.cwd() || cwd || "/"),
+      process,
+      lock: typeof syscalls.fileLock === "function" ? syscalls.fileLock : null,
+    }));
+  const nodeModules = createNodeModules({ process, syscalls, netLiveness, netServers, codec, cryptoCodec, hostAsyncHooks, pipeBridge, queueClose: loop.queueClose, sqliteHost: getSqliteHost });
   const bufferModule = nodeModules.require("buffer");
   const Buffer = bufferModule.Buffer;
   const path = nodeModules.require("path");
@@ -1652,9 +1666,14 @@ export function createRuntime({
   // closes over it long before this point in the file.
   function listPublicBuiltins() {
     if (publicBuiltinIds) return publicBuiltinIds;
-    publicBuiltinIds = NODE_PUBLIC_CORE_IDS.filter(
-      (id) => Object.prototype.hasOwnProperty.call(builtins, id) || nodeModules.has(id),
-    );
+    // A scheme-only builtin (node:sqlite) is listed WITH its prefix, as Node lists it:
+    // the bare name is an npm package, and a caller that strips nothing must not be
+    // told otherwise.
+    publicBuiltinIds = [];
+    for (const id of NODE_PUBLIC_CORE_IDS) {
+      if (Object.prototype.hasOwnProperty.call(builtins, id) || nodeModules.has(id)) publicBuiltinIds.push(id);
+      else if (nodeModules.has("node:" + id)) publicBuiltinIds.push("node:" + id);
+    }
     return publicBuiltinIds;
   }
 
@@ -1888,6 +1907,7 @@ export function createRuntime({
     // The loader's own resolver, for Bun.build's graph walk — so a bundle contains
     // what require() would have loaded here (see builtins/bun-build.js).
     resolveFrom: (specifier, fromDir) => moduleSystem.resolveFilename(specifier, fromDir),
+    sqliteHost: getSqliteHost,
   });
   for (const [name, mod] of Object.entries(bunRuntime.modules)) builtins[name] = mod;
   // `{ dotenv: true }` additionally performs Bun's automatic `.env` loading into

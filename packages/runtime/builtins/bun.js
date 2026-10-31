@@ -334,7 +334,18 @@ export const BUN_REVISION = BUN_VERSION + "-vivari";
 // entry in the modules object below. It is a factory rather than a require so it is built
 // at the moment of use and therefore honours a `process.chdir()`, and it is optional so a
 // caller that has only the root require (tests, older embedders) still works.
-export function createBunRuntime({ process, Buffer, require, makeCwdRequire, resolveFrom }) {
+// The runtime's SQLite host is built on first use (it closes over requires that do not
+// exist yet when the Bun runtime is assembled), so bun:sqlite gets a stand-in that asks
+// for it at the moment an engine is wanted. createBunSqlite only ever reaches the host
+// through these two members.
+function lazySqliteHost(getHost) {
+  return {
+    getEngine: () => getHost().getEngine(),
+    resolveEngineBytes: () => getHost().resolveEngineBytes(),
+  };
+}
+
+export function createBunRuntime({ process, Buffer, require, makeCwdRequire, resolveFrom, sqliteHost }) {
   const lazy = (name) => require(name);
 
   // Bun.build / Bun.plugin (./bun-build.js). `resolveFrom` is the module loader's
@@ -1790,9 +1801,13 @@ export function createBunRuntime({ process, Buffer, require, makeCwdRequire, res
     "bun:ffi": createBunFfi(),
     // Real SQLite on the vendored sqlite3.wasm, over a custom VFS backed by Vivari's
     // synchronous fs — see ./bun-sqlite.js for the whole design, including what is
-    // honestly missing (fsync, locking, WAL). Nothing is loaded until the first
-    // `new Database()`: this call only builds the host descriptor.
-    "bun:sqlite": createBunSqlite(createVivariSqliteHost({ require, makeCwdRequire, process })),
+    // honestly missing (fsync, WAL). Nothing is loaded until the first `new
+    // Database()`. The runtime hands in its per-process host so bun:sqlite and
+    // node:sqlite share one engine and the FS worker's lock table; a caller that
+    // does not (a test) gets a host of its own, without locking.
+    "bun:sqlite": createBunSqlite(
+      typeof sqliteHost === "function" ? lazySqliteHost(sqliteHost) : createVivariSqliteHost({ require, makeCwdRequire, process }),
+    ),
     // The bare `bun` specifier — `import { $, file, write, serve } from "bun"`,
     // which is how Bun's own docs reach most of this surface, and what every
     // copied-in snippet uses. It was missing entirely, so those imports failed

@@ -193,6 +193,18 @@ export const OP_UTIMES = 36;
 export const OP_FCHMOD = 37;
 export const OP_FUTIMES = 38;
 
+// Advisory locks for SQLite, held by the File System Worker so that every process
+// and thread sees one table (packages/kernel-host/file-locks.js has the protocol
+// and why it lives there). Never blocks: an ACQUIRE that cannot be granted answers
+// with the level the owner holds, and the caller's busy handler retries. `owner`
+// is chosen by the caller and only has to be unique within its process; the FS
+// worker scopes it by client, and drops a client's locks when it unregisters.
+//   OP_FILE_LOCK  field0 = path, field1 = u32 owner, field2 = u32 op
+//                 (0 acquire, 1 release, 2 check-reserved), field3 = u32 level
+//                                       -> OK u32 (level now held, or 0/1 for check)
+// 39, so isFsOpcode's CHMOD..FILE_LOCK range stays contiguous.
+export const OP_FILE_LOCK = 39;
+
 export const OP_PIPE_LISTEN = 31;
 export const OP_PIPE_CONNECT = 32;
 export const OP_PIPE_CLOSE_SERVER = 33;
@@ -236,7 +248,7 @@ export function isFsOpcode(op) {
     op === OP_LINK ||
     op === OP_WATCH ||
     op === OP_UNWATCH ||
-    (op >= OP_CHMOD && op <= OP_FUTIMES)
+    (op >= OP_CHMOD && op <= OP_FILE_LOCK)
   );
 }
 

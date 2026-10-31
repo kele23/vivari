@@ -46,6 +46,9 @@ packages/
     kernel.js      PID table, spawn/kill/waitpid, net port registry,
                    HTTP request routing, OP_RESPOND reassembly.
     fs-server.js   FsServer: owns the one VFS, services fs opcodes over each SAB.
+    file-locks.js  SQLite's five-level advisory lock table (OP_FILE_LOCK), held by
+                   FsServer so every process sees one table; a dead process's locks
+                   go with fs-unregister.
     kernel-fs.js   kernel-side sync fs helper.
     coreutils.js   echo/cat/ls/pwd/... + a small `sh`.
     net-relay.js   client for the OPTIONAL network relay (BootOptions.netRelay): Wisp v1 +
@@ -118,8 +121,10 @@ packages/
                    fdRead/fdWrite — so a .sqlite file is a real file in the tree.
                    The host (fs/path/cwd/engine bytes) is injected, which is what
                    lets the offline tier drive the SHIPPED code over node:fs.
-                   No durability (fsync is a no-op) and no locking; see the Bun
-                   section below and ARCHITECTURE.md §9.2.
+                   No durability (fsync is a no-op); locking is real, through the
+                   FS worker's lock table (OP_FILE_LOCK). See the Bun section below,
+                   the node:sqlite gotcha and ARCHITECTURE.md §9.2. The SAME engine,
+                   one per process, also backs node:sqlite (node/bindings/sqlite.js).
       bun-serve.js Bun.serve's OPTION POLICY (implement / degrade loudly / throw, one
                    written-down answer per documented option) and the RFC 6455 rules
                    its handshake and frame reader enforce. Pure — no sockets, no Node
@@ -167,6 +172,9 @@ packages/
       bindings/    our internalBinding shims (fs, tcp_wrap, zlib, crypto, ...).
         http_parser.js  selects the HTTP parser: real llhttp-in-Wasm (default),
                         pure-JS fallback. Force with VV_HTTP_PARSER=js|wasm.
+        sqlite.js    node:sqlite (DatabaseSync/StatementSync) over bun:sqlite's wasm
+                     engine, with Node's rules; lib/sqlite.js re-exports it. Only
+                     `node:sqlite` resolves — bare `sqlite` is an npm package.
         llhttp/      llhttp compiled to Wasm (vendored from undici) + the bridge
                      (llhttp-parser.js) folding llhttp callbacks onto Node's
                      HTTPParser contract; regen the binary via scripts/vendor-llhttp.mjs.
@@ -2041,6 +2049,48 @@ and `node-sass` are listed as "no verified substitute" rather than guessed at.
 `process.dlopen` throws the same error, because `node-gyp-build`, `bindings` and
 `node-pre-gyp` resolve the path themselves and call it instead of `require`.
 
+### node:sqlite, and why SQLite's file locks had to become real
+
+`node:sqlite` used to be unregistered, so `require("node:sqlite")` threw at module load.
+pnpm 11 moved its store index into SQLite through it and could not print its version.
+It is now `node/bindings/sqlite.js` over the wasm engine `bun:sqlite` already shipped.
+Four things to know before touching it:
+
+- **Node's rules are not Bun's, and the gate is real Node.** A JS number binds as a
+  double, a boolean as an integer, a column wider than 2^53 throws `ERR_OUT_OF_RANGE`
+  (Bun truncates), rows have a null prototype, `get()` of nothing is `undefined`, a
+  leading plain object is the named parameters (sigil optional), and an error thrown in
+  a user function reaches the caller as itself. `spike-node-sqlite.mjs` replays one
+  script on the host's `node:sqlite` and on ours and compares transcripts; every rule
+  above was found that way. A case we cannot match goes in its `DIVERGENT` list with a
+  reason, and the gate checks it still diverges. Today that is only WAL.
+- **Only `node:sqlite` resolves.** Like `node:test`, the bare name is an npm package
+  (`sqlite` is a popular one), so `loader.js` keeps `PREFIX_ONLY` and `Module.isBuiltin`
+  passes the request through unstripped. `builtinModules` lists `node:sqlite`, as Node.
+- **The build's defaults are not Node's.** It compiles DQS off and foreign keys off and
+  uses 8 KiB pages; Node turns foreign keys and defensive mode on and uses 4 KiB. `open()`
+  sets all of them through `sqlite3__wasm_db_config_ip` (the build's non-variadic
+  wrapper, since `sqlite3_db_config` itself is not exported) and `PRAGMA page_size`.
+- **Locks are real now, and the no-op was a data-loss bug, not a limitation.** pnpm's CLI
+  and every one of its worker threads open the store index at once, and each is its own
+  Web Worker with its own engine and page cache. With `xLock` answering "granted", two
+  writers interleaved and a committed row disappeared (the offline spike reproduces it
+  in four statements). `OP_FILE_LOCK` puts SQLite's five levels in a table in the File
+  System Worker (`kernel-host/file-locks.js`): it is the one thread every process's fs
+  traffic already goes through, one request at a time, and it hears `fs-unregister`, so
+  a killed process cannot leave a database locked. The table never blocks; SQLite's busy
+  handler waits in the caller, and **`xSleep` has to really sleep** (it parks on
+  `Atomics.wait`): the busy handler budgets by the delays it asked for, so a sleep that
+  returns at once spends a five-second `busy_timeout` in microseconds and reports
+  `SQLITE_BUSY` while the other writer is still committing. `spike-node-sqlite-vm.mjs`
+  proves it across real guest processes, and goes red (lost rows, a failed
+  integrity_check) with the lock table unplugged.
+
+`crypto.getCurves()` is `[]` for a related reason: pnpm 11's bundled openpgp builds its
+native-curve table from it at import time, and getCurves is how libraries decide what to
+hand to `createECDH`, which is still unsupported. An empty list sends them to their
+pure-JS curves; listing `prime256v1` would send them into the throw.
+
 ### The vendored napi host shadows the installed one — EXCEPT against emnapi 2
 `node/loader.js` maps the bare specifier `@napi-rs/wasm-runtime` to our vendored
 copy (`node/vendor/napi-wasm-runtime.js`, 0.2.12), so it shadows whatever the
@@ -3273,14 +3323,12 @@ the committed binary. Four things to internalize before touching it:
   `emscripten_resize_heap` detaches the old `ArrayBuffer`, so a cached `HEAPU8` from
   before a `malloc` reads a corpse. The loader compares `memory.buffer` identity on
   every access; keep that if you add a fast path.
-- **No durability and no locking, on purpose, and it is documented that way.** `xSync`
-  is a no-op because our `fsync`/`fdatasync` are — a crash mid-transaction still
-  recovers from the rollback journal, but power loss is not survivable. There is no
-  file locking anywhere in the fs stack, so two processes writing the same database
-  can corrupt it; this is what UPSTREAM ships too (the official build's default VFS is
-  literally `unix-none`), not a Vivari-specific compromise. `journal_mode = WAL` needs
+- **No durability, on purpose, and it is documented that way.** `xSync` is a no-op
+  because our `fsync`/`fdatasync` are — a crash mid-transaction still recovers from the
+  rollback journal, but power loss is not survivable. `journal_mode = WAL` needs
   cross-process shared memory, so it warns once and stays in `delete` mode. Do not
-  "fix" any of these by making them look like they work.
+  "fix" either by making it look like it works. **Locking used to be on this list and
+  is not any more** — see the node:sqlite gotcha below for why it had to become real.
 - **Keep the host injected.** `createBunSqlite(host)` takes `{fs, path, cwd,
   randomBytes, resolveEngineBytes}`, which is the only reason `spike-bun-offline.mjs` can drive the
   SHIPPED code over `node:fs` with no kernel. `spike-bun.mjs` then proves the same code

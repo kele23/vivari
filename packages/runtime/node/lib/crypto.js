@@ -1089,6 +1089,13 @@ export default function (exports, require, module, process, internalBinding) {
     getRandomValues: (arr) => webcrypto.getRandomValues(arr),
     getHashes: () => binding.getHashes(),
     getCiphers: () => ["aes-128-cbc", "aes-192-cbc", "aes-256-cbc", "aes-128-gcm", "aes-256-gcm"],
+    // EMPTY, on purpose, until createECDH exists. getCurves is how libraries decide
+    // whether to hand a curve to native ECDH (openpgp builds its whole native-curve
+    // table from it at import time, which is how pnpm 11 died on its absence), so
+    // listing prime256v1 here would send them straight into createECDH's throw. An
+    // empty list sends them to their pure-JS fallbacks, which work. EC keygen and
+    // ECDSA sign/verify do not consult it and are unaffected.
+    getCurves: () => [],
     constants: { ...CRYPTO_CONSTANTS },  // a copy: callers must not mutate the table
     webcrypto,
     // Key material. Secret (symmetric) via createSecretKey; asymmetric (ec/

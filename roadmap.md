@@ -11839,3 +11839,53 @@ registration. Checked against the running dev server in headless Chrome: with th
 missing the terminal names it and how to build it, and after building it the next `npm` in
 the same page loads the real CLI. Gate: two sections in `spike-install-latency.mjs`; with the
 old code 5 of their 10 checks fail.
+
+## `node:sqlite`, real SQLite file locks, and how far pnpm 11 gets (this change)
+
+`require("node:sqlite")` threw `no vendored Node builtin`, which stopped pnpm 11 at module
+load: since 11.0 its store index is a SQLite database it reaches through `node:sqlite`.
+StackBlitz's WebContainer fails on the same API (webcontainer-core #2150), so this was also
+a place to be ahead rather than level.
+
+What landed:
+
+- **`node:sqlite`** as `internalBinding('sqlite')` (`node/bindings/sqlite.js`) behind a
+  one-line `lib/sqlite.js`, on the wasm engine `bun:sqlite` already shipped, one engine per
+  process shared by both modules. `DatabaseSync` (open/close/exec/prepare, `function`,
+  `aggregate` incl. window functions, serialize/deserialize, `createTagStore`, `limits`,
+  `Symbol.dispose`) and `StatementSync` (all/get/run/iterate, columns, the four setters,
+  sourceSQL/expandedSQL). Only `node:sqlite` resolves; the bare `sqlite` stays the npm
+  package's. Refused with a reason: extensions, sessions/changesets, `backup()`,
+  `setAuthorizer()`.
+- **The oracle is real Node.** `spike-node-sqlite.mjs` runs one script on the host's
+  `node:sqlite` and on ours: 117 of 118 cases identical, the remaining one (WAL on a file)
+  pinned as a divergence with its reason. The first run was 113 of 118, and the five were
+  all things reading the docs would not have caught: enumerable internal fields, V8's own
+  error for a class called without `new`, and the engine's 8 KiB default page.
+- **SQLite file locks are real** (`OP_FILE_LOCK`, `kernel-host/file-locks.js`). Every guest
+  process has its own engine and page cache, so with `xLock` a no-op two writers lost rows.
+  This was documented as an upstream-matching limitation; pnpm 11 opening the index from its
+  CLI and every worker thread made it a data-loss bug on every install. The table lives in
+  the File System Worker (atomic for free, and told when a process dies). `xSleep` now parks
+  on `Atomics.wait`, because SQLite's busy handler budgets by requested delays and a sleep
+  that returns at once turns a 5 s `busy_timeout` into an immediate `SQLITE_BUSY`.
+  `spike-node-sqlite-vm.mjs` runs four guest writers at once (800 of 800 rows, integrity
+  `ok`), a waiter that outlasts a holder, and a killed holder whose lock is released; with
+  the table unplugged the same spike loses rows and fails `integrity_check`. `bun:sqlite`
+  gets the locks too.
+- `crypto.getCurves()` exists and returns `[]` until `createECDH` does (see AGENTS.md).
+
+**pnpm 11 itself is not shipped yet, and this is why.** With the above, pnpm 11.28.9 boots
+in the VM (`pnpm --version` prints `11.28.9`) and opens its SQLite store index. The next
+wall is the network: unlike npm, which goes through `https.request` and so through
+`internal/fetch-transport.js`, pnpm 11 bundles **undici** and dials the registry itself with
+`tls.connect`, which `lib/tls.js` refuses (`ERR_METHOD_NOT_IMPLEMENTED`). The fix has a clear
+shape: a socket returned by `tls.connect` (and `net.connect` to a non-loopback host) that
+reads the HTTP/1.1 requests undici writes into it and answers each one through the same
+fetch transport, so every raw-socket HTTP client gets egress, not only pnpm. It is a runtime
+feature of its own and needs its own gate against real undici, so it is not folded in here.
+The vendored pnpm stays at 9.15.9 until it lands. `spike-pnpm.mjs` now supplies the SQLite
+engine and takes `VV_PNPM_VERSION`, so it can be pointed at an 11.x tree to re-measure.
+Two smaller pnpm 11 facts for whoever picks it up: it reads `pnpm_config_*` environment
+variables, not `npm_config_*` (the studio's store-dir and import-method settings use the
+latter), and `bin/pnpm.mjs` loads the bundle with a top-level `await import()`.

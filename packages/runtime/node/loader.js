@@ -150,6 +150,7 @@ import readlineFactory from "./lib/readline.js";
 import fsPromisesFactory from "./lib/fs/promises.js";
 import perfHooksFactory from "./lib/perf_hooks.js";
 import v8Factory from "./lib/v8.js";
+import sqliteFactory from "./lib/sqlite.js";
 import vmFactory from "./lib/vm.js";
 import fastUtf8StreamFactory from "./lib/fast-utf8-stream.js";
 import fsDirFactory from "./internal/fs/dir.js";
@@ -372,14 +373,25 @@ const FACTORIES = {
   http2: http2Factory,
   wasi: wasiFactory,
   worker_threads: workerThreadsFactory,
+  sqlite: sqliteFactory,
   semver: semverFactory,
   "@napi-rs/wasm-runtime": napiWasmRuntimeFactory,
 };
 
 const strip = (name) => (name.startsWith("node:") ? name.slice(5) : name);
 
-export function createNodeModules({ process, syscalls, netLiveness, netServers, codec, cryptoCodec, hostAsyncHooks, pipeBridge, queueClose }) {
-  const internalBinding = createInternalBinding({ syscalls, process, netLiveness, netServers, codec, cryptoCodec, hostAsyncHooks, pipeBridge, queueClose });
+// Builtins Node serves ONLY under the `node:` scheme. The bare names are ordinary npm
+// packages (`sqlite` is a popular one), so resolving them to the builtin would shadow
+// a dependency the project installed. Module.isBuiltin('sqlite') is false on Node too.
+export const PREFIX_ONLY = new Set(["sqlite", "sea", "test", "test/reporters"]);
+const served = (name) => {
+  const id = strip(name);
+  if (!Object.prototype.hasOwnProperty.call(FACTORIES, id)) return false;
+  return !PREFIX_ONLY.has(id) || name.startsWith("node:");
+};
+
+export function createNodeModules({ process, syscalls, netLiveness, netServers, codec, cryptoCodec, hostAsyncHooks, pipeBridge, queueClose, sqliteHost }) {
+  const internalBinding = createInternalBinding({ syscalls, process, netLiveness, netServers, codec, cryptoCodec, hostAsyncHooks, pipeBridge, queueClose, sqliteHost });
   const modules = new Map(); // id -> module object (kept for cycle resolution)
 
   function nodeRequire(name) {
@@ -410,7 +422,7 @@ export function createNodeModules({ process, syscalls, netLiveness, netServers, 
   return {
     require: nodeRequire,
     /** True if `name` is served by the vendored Node lib (public ids only). */
-    has: (name) => Object.prototype.hasOwnProperty.call(FACTORIES, strip(name)),
+    has: served,
     /** The internalBinding seam — exposed so the legacy `process.binding(name)`
      *  shim (index.js) can delegate to the same bindings (e.g. constants). */
     internalBinding,

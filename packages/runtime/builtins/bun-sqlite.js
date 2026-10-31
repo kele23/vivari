@@ -70,13 +70,16 @@
 //     xDeviceCharacteristics: those flags let SQLite SKIP sync-ordering work, and adding a
 //     second lie on top of the first one is how corruption stops being theoretical.
 //
-//   * File locking. There is no flock/fcntl opcode anywhere in packages/protocol/syscall.js,
-//     so xLock/xUnlock/xCheckReservedLock are no-ops and two PROCESSES writing one database
-//     file can corrupt it. Worth knowing before treating that as a Vivari-specific
-//     compromise: the official sqlite.org wasm build's own default VFS is `unix-none` —
-//     SQLite's explicitly lock-free unix VFS. Upstream already made this call for the
-//     browser. We match the reference build rather than falling short of it. Same-process
-//     multiple connections are fine and are a normal pattern.
+//   * File locking is REAL, but only between SQLite connections. xLock/xUnlock/
+//     xCheckReservedLock go to OP_FILE_LOCK, an advisory lock table in the File System
+//     Worker (packages/kernel-host/file-locks.js) that every process and thread shares,
+//     so two processes writing one database serialise the way SQLite intends instead of
+//     interleaving pages. This used to be a no-op, matching the official wasm build's
+//     lock-free `unix-none` default, and it stopped being acceptable when pnpm 11 moved
+//     its store index into SQLite: the CLI and its worker threads all write it during
+//     every install. The locks are SQLite's five levels, not POSIX ones, and nothing but
+//     this VFS takes them. A host with no `lock` (the offline tier over node:fs) keeps the
+//     old no-op, and so does a File System Worker too old to know the opcode.
 //
 //   * WAL. Write-ahead logging needs a shared-memory wal-index via an iVersion>=2 VFS's
 //     xShmMap family (https://www.sqlite.org/wal.html#implementation_of_shared_memory_for_the_wal_index),
@@ -99,6 +102,8 @@
 // (makeTrampoline, transactionPlan, resultCodeName, coerceBoundValue, …) are exported for
 // the same reason: see AGENTS.md on exporting for the spike rather than duplicating.
 
+import { parkFor } from "../../protocol/syscall.js";
+
 // ---- result codes ------------------------------------------------------------------
 
 export const SQLITE_OK = 0;
@@ -118,6 +123,14 @@ const SQLITE_IOERR_WRITE = 778;
 const SQLITE_IOERR_TRUNCATE = 1546;
 const SQLITE_IOERR_FSTAT = 1802;
 const SQLITE_IOERR_DELETE = 2570;
+const SQLITE_IOERR_CHECKRESERVEDLOCK = 3594;
+const SQLITE_IOERR_UNLOCK = 2058;
+const SQLITE_IOERR_LOCK = 3850;
+
+// OP_FILE_LOCK operations (packages/kernel-host/file-locks.js).
+const LOCK_OP_ACQUIRE = 0;
+const LOCK_OP_RELEASE = 1;
+const LOCK_OP_CHECK = 2;
 
 // open flags (sqlite3_open_v2 / xOpen)
 const OPEN_READONLY = 0x00000001;
@@ -571,7 +584,7 @@ export function createSqliteEngine(bytes, host) {
         total += len;
       }
       if (text.trim() && typeof console !== "undefined") {
-        console.error("bun:sqlite [engine]: " + text.trimEnd());
+        console.error("sqlite [engine]: " + text.trimEnd());
       }
       view.setUint32(pWritten, total, true);
       return 0;
@@ -616,7 +629,27 @@ export function createSqliteEngine(bytes, host) {
 
   // ---- the VFS ----
 
-  // pFile pointer -> { fd, path, deleteOnClose }
+  // Locking is on when the host can reach a lock table (host.lock), and turns itself
+  // off the first time that table says it does not exist, so an embedder pairing this
+  // runtime with an older File System Worker gets the old no-op rather than an error.
+  let locking = typeof host.lock === "function";
+  function fileLock(handle, op, level) {
+    let answer;
+    try {
+      answer = host.lock(handle.path, handle.owner, op, level);
+    } catch (e) {
+      if (e && /ENOSYS/.test(String(e.message || e))) {
+        locking = false;
+        return op === LOCK_OP_ACQUIRE ? level : 0;
+      }
+      throw e;
+    }
+    if (op === LOCK_OP_ACQUIRE || op === LOCK_OP_RELEASE) handle.lockLevel = answer;
+    return answer;
+  }
+  const sleep = typeof host.sleep === "function" ? host.sleep : parkFor;
+
+  // pFile pointer -> { fd, path, deleteOnClose, owner, lockLevel }
   const openFiles = new Map();
   let transientSeq = 0;
 
@@ -631,6 +664,8 @@ export function createSqliteEngine(bytes, host) {
       const handle = openFiles.get(pFile);
       if (!handle) return SQLITE_OK;
       openFiles.delete(pFile);
+      // SQLite unlocks before closing; this is the belt for a path that did not.
+      if (handle.lockLevel > 0) fileLock(handle, LOCK_OP_RELEASE, 0);
       try {
         fs.closeSync(handle.fd);
       } catch {
@@ -712,12 +747,41 @@ export function createSqliteEngine(bytes, host) {
       return SQLITE_OK;
     },
 
-    // No locking primitive in the runtime. Matches the upstream build's own default
-    // `unix-none` VFS; see the header.
-    xLock: () => SQLITE_OK,
-    xUnlock: () => SQLITE_OK,
+    // SQLite's five-level protocol over the FS worker's lock table (see the header).
+    // An acquire that cannot be granted answers with the level actually held, which
+    // SQLite needs recorded: a failed EXCLUSIVE keeps PENDING.
+    xLock: (pFile, level) => {
+      const handle = fileFor(pFile);
+      if (!locking) return SQLITE_OK;
+      let held;
+      try {
+        held = fileLock(handle, LOCK_OP_ACQUIRE, level);
+      } catch {
+        return SQLITE_IOERR_LOCK;
+      }
+      return held >= level ? SQLITE_OK : SQLITE_BUSY;
+    },
+    xUnlock: (pFile, level) => {
+      const handle = fileFor(pFile);
+      if (!locking) return SQLITE_OK;
+      try {
+        fileLock(handle, LOCK_OP_RELEASE, level);
+      } catch {
+        return SQLITE_IOERR_UNLOCK;
+      }
+      return SQLITE_OK;
+    },
     xCheckReservedLock: (pFile, pResOut) => {
-      dv().setInt32(pResOut, 0, true);
+      const handle = fileFor(pFile);
+      let reserved = 0;
+      if (locking) {
+        try {
+          reserved = fileLock(handle, LOCK_OP_CHECK, 0) ? 1 : 0;
+        } catch {
+          return SQLITE_IOERR_CHECKRESERVEDLOCK;
+        }
+      }
+      dv().setInt32(pResOut, reserved, true);
       return SQLITE_OK;
     },
 
@@ -784,7 +848,7 @@ export function createSqliteEngine(bytes, host) {
         return SQLITE_CANTOPEN;
       }
 
-      openFiles.set(pFile, { fd, path: target, deleteOnClose });
+      openFiles.set(pFile, { fd, path: target, deleteOnClose, owner: pFile >>> 0, lockLevel: 0 });
       dv().setInt32(pFile, pIoMethods, true); // sqlite3_file.pMethods
       if (pOutFlags) {
         dv().setInt32(pOutFlags, readonly ? OPEN_READONLY : OPEN_READWRITE, true);
@@ -844,10 +908,16 @@ export function createSqliteEngine(bytes, host) {
       return n;
     },
 
-    // Only ever called while retrying a contended lock, which cannot happen without
-    // locking. Return 0 rather than busy-waiting: burning a whole process worker inside
-    // a VFS callback would be worse than not sleeping.
-    xSleep: () => 0,
+    // SQLite's busy handler (busy_timeout) sleeps here between retries of a contended
+    // lock. It has to really wait: the handler budgets by the delays it ASKED for, so a
+    // sleep that returns at once burns a five-second timeout in microseconds and the
+    // caller sees SQLITE_BUSY while the other process is still mid-commit. A park on
+    // Atomics.wait is legal in every worker, which is everywhere guest code runs; where
+    // it is not (a main thread), report that no time passed rather than spin.
+    xSleep: (pVfs, micros) => {
+      const us = micros | 0;
+      return sleep(Math.ceil(us / 1000)) ? us : 0;
+    },
 
     xCurrentTime: (pVfs, pOut) => {
       dv().setFloat64(pOut, Date.now() / 86400000 + 2440587.5, true);
@@ -897,6 +967,10 @@ export function createSqliteEngine(bytes, host) {
     version: readCString(E.sqlite3_libversion()),
     vfsName: "vivari",
     openFileCount: () => openFiles.size,
+    // For callbacks SQLite calls through a function pointer (node:sqlite's
+    // user-defined functions). Each call grows the table, so install a dispatcher
+    // once and key it by user data rather than installing one per function.
+    installFunction,
   };
 }
 
@@ -912,7 +986,7 @@ const PROJECT_ENGINES = [
 
 function engineMissingError(detail) {
   return new Error(
-    "bun:sqlite could not load a SQLite engine: " + detail + "\n" +
+    "bun:sqlite / node:sqlite could not load a SQLite engine: " + detail + "\n" +
       "This build ships one at packages/runtime/vendor/sqlite/sqlite3.wasm, delivered to " +
       "the browser by `npm run vendor:sqlite` (part of predev / prebuild:studio). If you " +
       "are embedding Vivari, either run that step and rebuild, or point " +
@@ -942,7 +1016,7 @@ function engineMissingError(detail) {
  *      Atomics.wait while the kernel streams the body into the VFS — so it is
  *      synchronous from the guest's point of view and bypasses the 1 MiB SAB window.
  */
-export function createVivariSqliteHost({ require, makeCwdRequire, process }) {
+export function createVivariSqliteHost({ require, makeCwdRequire, process, lock = null }) {
   let cachedFs = null;
   let cachedPath = null;
   const nodeFs = () => (cachedFs || (cachedFs = require("fs")));
@@ -1016,7 +1090,8 @@ export function createVivariSqliteHost({ require, makeCwdRequire, process }) {
     return readFromPath(meta.path);
   }
 
-  return {
+  let engine = null;
+  const host = {
     get fs() {
       return nodeFs();
     },
@@ -1041,8 +1116,17 @@ export function createVivariSqliteHost({ require, makeCwdRequire, process }) {
     // /tmp is guaranteed to exist by the kernel and is excluded from OPFS persistence,
     // which is exactly right for SQLite's transient files.
     tmpDir: "/tmp",
+    // OP_FILE_LOCK, when the runtime has it (see createSqliteEngine's locking note).
+    lock,
     resolveEngineBytes,
+    // ONE engine per process, shared by bun:sqlite and node:sqlite. Each is a whole
+    // wasm instance with its own heap, and a process that uses both (a Bun app whose
+    // dependency reaches for node:sqlite) should not pay for two.
+    getEngine() {
+      return engine || (engine = createSqliteEngine(resolveEngineBytes(), host));
+    },
   };
+  return host;
 }
 
 // ---- Database / Statement -------------------------------------------------------------
@@ -1079,7 +1163,9 @@ export function createBunSqlite(host) {
 
   function getEngine() {
     if (engine) return engine;
-    engine = createSqliteEngine(host.resolveEngineBytes(), host);
+    engine = typeof host.getEngine === "function"
+      ? host.getEngine()
+      : createSqliteEngine(host.resolveEngineBytes(), host);
     return engine;
   }
 
