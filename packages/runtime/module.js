@@ -187,37 +187,43 @@ export function createModuleSystem({ fs, path, builtins, process, globals, nodeM
   // dual packages that omit a "require" key but ship a CJS "default" (e.g.
   // tslib: { module, import: <esm>, default: <cjs> }) — require() must land on
   // the CJS default, not the ESM import.
+  //
+  // Node stops at the first matching condition and fails when that file is
+  // missing. Packages shipped as pruned, ESM-only copies keep the CJS target in
+  // "main"/"require" after removing it from the tarball (nitro's traced
+  // dist/node_modules: defu declares lib/defu.cjs but only ships dist/defu.mjs),
+  // so a single pick makes an installed package unloadable. Collect every
+  // candidate in condition order and take the first that exists; loading the ESM
+  // build is safe because this runtime transpiles ESM to CJS at load.
   const EXPORT_CONDITIONS = ["node", "require", "default", "import"];
-  function pickCondition(val) {
-    if (typeof val === "string") return val;
-    if (Array.isArray(val)) {
-      for (const v of val) {
-        const r = pickCondition(v);
-        if (r) return r;
-      }
-      return null;
-    }
-    if (val && typeof val === "object") {
+  function conditionTargets(val, out = []) {
+    if (typeof val === "string") {
+      out.push(val);
+    } else if (Array.isArray(val)) {
+      for (const v of val) conditionTargets(v, out);
+    } else if (val && typeof val === "object") {
       for (const c of EXPORT_CONDITIONS) {
-        if (Object.prototype.hasOwnProperty.call(val, c)) {
-          const r = pickCondition(val[c]);
-          if (r) return r;
-        }
+        if (Object.prototype.hasOwnProperty.call(val, c)) conditionTargets(val[c], out);
       }
     }
-    return null;
+    return out;
+  }
+  // The wildcard branch below rewrites "*" per request, so it still needs a
+  // single target; the first candidate is the same one the old picker returned.
+  function pickCondition(val) {
+    return conditionTargets(val)[0] ?? null;
   }
 
   function resolveExports(pkgDir, exportsField, sub) {
-    let target = null;
+    let candidates = [];
     if (typeof exportsField === "string" || Array.isArray(exportsField)) {
-      target = sub === "." ? pickCondition(exportsField) : null;
+      if (sub === ".") candidates = conditionTargets(exportsField);
     } else if (exportsField && typeof exportsField === "object") {
       const keys = Object.keys(exportsField);
       const isSubpathMap = keys.some((k) => k.startsWith("."));
       if (isSubpathMap) {
         if (Object.prototype.hasOwnProperty.call(exportsField, sub)) {
-          target = pickCondition(exportsField[sub]);
+          candidates = conditionTargets(exportsField[sub]);
         } else {
           for (const k of keys) {
             if (k.endsWith("/*")) {
@@ -225,20 +231,23 @@ export function createModuleSystem({ fs, path, builtins, process, globals, nodeM
               if (sub.startsWith(pre)) {
                 const t = pickCondition(exportsField[k]);
                 if (t) {
-                  target = t.replace("*", sub.slice(pre.length));
+                  candidates = [t.replace("*", sub.slice(pre.length))];
                   break;
                 }
               }
             }
           }
         }
-      } else {
-        target = sub === "." ? pickCondition(exportsField) : null;
+      } else if (sub === ".") {
+        candidates = conditionTargets(exportsField);
       }
     }
-    if (!target) return null;
-    const full = path.join(pkgDir, target);
-    return tryExtensions(full) || (isFile(full) && full) || null;
+    for (const target of candidates) {
+      const full = path.join(pkgDir, target);
+      const resolved = tryExtensions(full) || (isFile(full) && full) || null;
+      if (resolved) return resolved;
+    }
+    return null;
   }
 
   function splitBare(request) {
@@ -262,9 +271,12 @@ export function createModuleSystem({ fs, path, builtins, process, globals, nodeM
         const r = resolveExports(dir, pkg.exports, ".");
         if (r) return r;
       }
-      const main = pkg.main || (pkg.module && typeof pkg.module === "string" ? pkg.module : null);
-      if (main) {
-        const target = path.join(dir, main);
+      // "main" first (the CJS entry require() wants), then "module" (the ESM one
+      // bundlers use): a pruned, ESM-only copy can keep a "main" whose file was
+      // removed, leaving "module" as the only entry that exists on disk.
+      for (const field of [pkg.main, pkg.module]) {
+        if (typeof field !== "string") continue;
+        const target = path.join(dir, field);
         const resolved = tryExtensions(target) || loadIndex(target);
         if (resolved) return resolved;
       }
