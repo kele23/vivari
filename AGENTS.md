@@ -2063,7 +2063,11 @@ Four things to know before touching it:
   a user function reaches the caller as itself. `spike-node-sqlite.mjs` replays one
   script on the host's `node:sqlite` and on ours and compares transcripts; every rule
   above was found that way. A case we cannot match goes in its `DIVERGENT` list with a
-  reason, and the gate checks it still diverges. Today that is only WAL.
+  reason, and the gate checks it still diverges. Today that is only WAL. The oracle has to be
+  the Node line the runtime reports (24): node:sqlite on 22 lacks `serialize`/`limits`/
+  `createTagStore` and binds booleans differently, so on any other host the spike skips the
+  differential, and a separate toolchain-gate step runs it on Node 24 with
+  `VV_REQUIRE_SQLITE_ORACLE=1` so the skip cannot pass there.
 - **Only `node:sqlite` resolves.** Like `node:test`, the bare name is an npm package
   (`sqlite` is a popular one), so `loader.js` keeps `PREFIX_ONLY` and `Module.isBuiltin`
   passes the request through unstripped. `builtinModules` lists `node:sqlite`, as Node.

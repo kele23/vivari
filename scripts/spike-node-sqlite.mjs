@@ -441,9 +441,25 @@ const DIVERGENT = {
   // The session extension is compiled in but not wired to this binding yet.
 };
 
+// node:sqlite changes a lot between Node lines (22 has no serialize, createTagStore or
+// limits, binds booleans differently and orders run()'s keys the other way), so only a
+// host on the line the runtime reports is an oracle for it. On any other host the
+// differential is skipped and says so; VV_REQUIRE_SQLITE_ORACLE=1 (set by the CI step
+// that runs this on that line) turns the skip into a failure, so the tier cannot go
+// quietly unexercised.
+const EMULATED = /version:\s*"v(\d+)\./.exec(
+  fs.readFileSync(path.join(ROOT, "packages/runtime/builtins/process.js"), "utf8"),
+)[1];
+const HOST = process.versions.node.split(".")[0];
+const oracleOk = hostSqlite && HOST === EMULATED;
+
 console.log("node:sqlite, ours against the host's:");
-if (!hostSqlite) {
-  ok(false, "the host has node:sqlite (Node >= 22.13), which is the oracle this tier needs");
+if (!oracleOk) {
+  const why = !hostSqlite
+    ? "the host has no node:sqlite"
+    : `the host is Node ${HOST} and the runtime reports Node ${EMULATED}`;
+  if (process.env.VV_REQUIRE_SQLITE_ORACLE === "1") ok(false, `differential needs a Node ${EMULATED} host: ${why}`);
+  else console.log(`  - SKIPPED: ${why}; run on Node ${EMULATED} for the differential`);
 } else {
   const dirHost = fs.mkdtempSync(path.join(fs.realpathSync(os.tmpdir()), "vv-nsq-host-"));
   const dirOurs = fs.mkdtempSync(path.join(fs.realpathSync(os.tmpdir()), "vv-nsq-ours-"));

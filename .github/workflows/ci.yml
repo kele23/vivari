@@ -37,6 +37,21 @@ jobs:
         with:
           node-version: 22
       - run: node scripts/run-spikes.mjs --offline
+      # node:sqlite's differential uses the host's node:sqlite as its oracle, and
+      # that API moves a lot between Node lines, so it only means something on the
+      # line the runtime reports (process.version). Everything else here runs on 22,
+      # where the spike skips that tier; this step runs it where it counts and makes
+      # the skip a failure.
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 24
+      - name: node:sqlite against a real Node 24
+        run: node scripts/run-spikes.mjs --offline node-sqlite
+        env:
+          VV_REQUIRE_SQLITE_ORACLE: "1"
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 22
       # The notebook's view, rendered under jsdom. It is `net` only because it
       # installs React, a DOM and a bundler off the registry — it runs no
       # container, needs no Wasm and touches no network of its own, so it belongs
