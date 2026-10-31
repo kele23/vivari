@@ -261,6 +261,17 @@ only wired when `VV_DEBUG` is set, so non-debug runs never allocate it.
   busy, so a reload never restores an index that is minutes behind what OPFS already
   holds. `flush()` on page-hide promises the project paths plus the index, then
   returns without waiting for the cache backlog.
+  **Several tabs, one mirror:** OPFS is per origin, so every Studio tab on an origin
+  restores the same tree and mirrors into the same directory and `manifest.json`. A
+  tab's VFS does not see what another tab writes until it reloads. To keep tabs from
+  erasing each other in the index, each kernel records only the paths it changed
+  (`owned`) and merges those into the index on disk instead of rewriting it from its
+  own `meta`. The merge and `restore()`'s read both run under the `vv-vfs-manifest` Web
+  Lock. The live index is replaced by writing `manifest.json.new` and `move()`-ing it
+  over (a copy where `move()` is missing); readers fall back to the staged copy and
+  retry, and an index that exists but will not parse is never overwritten. File bytes
+  are last-writer-wins: two tabs editing the same path keep whichever wrote last.
+  `vv-depcache/`'s index has the same shape of race and is not merged (see roadmap).
 - **Dependency cache** (`packages/kernel-host/dep-cache.js`, stored under `vv-depcache/` in OPFS):
   layered on top of the mirror. A lockfile-keyed snapshot of a whole `node_modules` tree
   (`dep-cache-{has,save,restore}` messages against the in-worker VFS, exposed to the kernel as

@@ -144,6 +144,10 @@ const SPIKES = [
   // Drives the real opfs-persistence.js against an in-memory OPFS — no kernel, no
   // Wasm, so it runs in the earliest gate.
   { name: "opfs-delete-recreate", file: "spike-opfs-delete-recreate.mjs", net: false, timeout: 60000 },
+  // Two tabs on one origin share the mirror: the index is merged per kernel under a
+  // Web Lock, replaced through a staged copy, and read under the same lock at boot.
+  // Same in-memory OPFS as above (scripts/lib/fake-opfs.mjs), no kernel, no Wasm.
+  { name: "opfs-multitab", file: "spike-opfs-multitab.mjs", net: false, timeout: 60000 },
   // The gates above read `public/vendor`, which is gitignored build output: it
   // survives between commands on a developer's machine and has never existed on
   // a fresh checkout. Three regressions came from that asymmetry, `predev` not

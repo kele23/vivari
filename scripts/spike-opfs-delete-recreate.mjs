@@ -14,12 +14,14 @@
 // HOW IT IS GATED. The real opfs-persistence.js runs against an in-memory OPFS and
 // an in-memory VFS facade; each case keeps the drain busy on an unrelated path so
 // the delete and the write coalesce, then restores into a fresh VFS and compares.
-// The fake OPFS throws TypeMismatchError on a name of the other kind, as real OPFS
-// does, so the kind-change cases fail the way they fail in a browser.
+// The fake OPFS (scripts/lib/fake-opfs.mjs) throws TypeMismatchError on a name of
+// the other kind, as real OPFS does, so the kind-change cases fail the way they fail
+// in a browser.
 //
 //   run:  node scripts/spike-opfs-delete-recreate.mjs
 
 import { createOpfsPersistence } from "../packages/kernel-host/opfs-persistence.js";
+import { fakeOpfs, fakeVfs, bytes, text } from "./lib/fake-opfs.mjs";
 
 let failed = 0;
 const ok = (cond, msg) => {
@@ -27,61 +29,6 @@ const ok = (cond, msg) => {
   if (!cond) failed++;
 };
 
-const notFound = (what) => Object.assign(new Error("Missing " + what), { name: "NotFoundError" });
-const mismatch = (what) => Object.assign(new Error(what + " is the other kind"), { name: "TypeMismatchError" });
-
-function fakeOpfs() {
-  const directory = () => ({ dirs: new Map(), files: new Map() });
-  const root = directory();
-  const handle = (dir) => ({
-    async getDirectoryHandle(name, { create = false } = {}) {
-      if (dir.files.has(name)) throw mismatch(name);
-      if (!dir.dirs.has(name) && create) dir.dirs.set(name, directory());
-      if (!dir.dirs.has(name)) throw notFound("directory");
-      return handle(dir.dirs.get(name));
-    },
-    async getFileHandle(name, { create = false } = {}) {
-      if (dir.dirs.has(name)) throw mismatch(name);
-      if (!dir.files.has(name) && create) dir.files.set(name, new Uint8Array());
-      if (!dir.files.has(name)) throw notFound("file");
-      return {
-        async createSyncAccessHandle() {
-          return {
-            getSize: () => dir.files.get(name).length,
-            read: (bytes) => bytes.set(dir.files.get(name)),
-            truncate: (length) => dir.files.set(name, dir.files.get(name).slice(0, length)),
-            write: (bytes) => dir.files.set(name, Uint8Array.from(bytes)),
-            flush() {},
-            close() {},
-          };
-        },
-      };
-    },
-    async removeEntry(name, { recursive = false } = {}) {
-      if (dir.files.delete(name)) return;
-      const child = dir.dirs.get(name);
-      if (!child) throw notFound("entry");
-      if (!recursive && (child.dirs.size || child.files.size)) throw new Error("NotEmptyError");
-      dir.dirs.delete(name);
-    },
-  });
-  return { getDirectory: async () => handle(root) };
-}
-
-function fakeVfs() {
-  const entries = new Map();
-  return {
-    entries,
-    read: (path) => entries.get(path),
-    walk: (path) => [...entries.keys()].filter((key) => key === path || key.startsWith(path + "/")),
-    mkdirp: (path) => entries.set(path, { kind: "dir", mode: 0o755 }),
-    writeFile: (path, bytes) => entries.set(path, { kind: "file", mode: 0o644, bytes }),
-    symlink: (target, path) => entries.set(path, { kind: "symlink", mode: 0o777, target }),
-  };
-}
-
-const bytes = (s) => new TextEncoder().encode(s);
-const text = (b) => new TextDecoder().decode(b);
 const rmTree = (vfs, path) => {
   for (const k of vfs.walk(path)) vfs.entries.delete(k);
 };

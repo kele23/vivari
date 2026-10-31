@@ -220,42 +220,59 @@ export async function createOpfsPersistence({
     }
   }
 
+  // navigator.locks serializes index access across tabs: the read-modify-write in
+  // writeManifest and the read in restore. Where it is missing (older engine) the work
+  // still runs, just without the interleave guard.
+  function withManifestLock(fn) {
+    const locks = typeof navigator !== "undefined" ? navigator.locks : undefined;
+    return locks && typeof locks.request === "function" ? locks.request(MANIFEST_LOCK, fn) : fn();
+  }
+
   async function writeManifest() {
     const apply = async () => {
-      // Read-merge-write: apply only OUR changes, so paths another tab mirrored and
-      // this kernel never saw stay in the index. With no index at all (first boot) this
-      // kernel's `meta` is the best view there is.
-      const index = await readManifest();
-      // An index that exists but cannot be parsed must not be replaced by this tab's
-      // partial view: that turns a transient read race into real data loss. Keep the
-      // changes queued and let a later pass (or the next boot) try again.
-      if (!index.ok) {
-        if (!manifestUnreadable) {
-          manifestUnreadable = true;
-          console.warn(
-            "[opfs] the VFS index is unreadable; keeping it rather than overwriting it",
-          );
-        }
-        throw new Error("vv-vfs: manifest unreadable");
-      }
-      manifestUnreadable = false;
-      const onDisk = index.entries ?? new Map(meta);
-      for (const [path, op] of owned) {
-        if (op === "d") onDisk.delete(path);
-        else {
-          const e = meta.get(path);
-          if (e) onDisk.set(path, e);
-          else onDisk.delete(path); // vanished between enqueue and drain
-        }
-      }
-      await replaceManifest(enc.encode(JSON.stringify([...onDisk.entries()])));
+      // Take this pass's changes up front. The drain keeps running while the index is
+      // read and replaced below, and whatever it records in the meantime must survive
+      // for the next pass: clearing `owned` after the write dropped those paths from
+      // the index for good.
+      const batch = new Map(owned);
       owned.clear();
+      try {
+        await mergeIntoIndex(batch);
+      } catch (err) {
+        // Put back what did not land, unless a newer change to the same path did.
+        for (const [path, op] of batch) if (!owned.has(path)) owned.set(path, op);
+        throw err;
+      }
     };
-    // navigator.locks serializes the read-modify-write across tabs. Where it is
-    // missing (older engine) the merge still runs, just without the interleave guard.
-    const locks = typeof navigator !== "undefined" ? navigator.locks : undefined;
-    if (locks && typeof locks.request === "function") await locks.request(MANIFEST_LOCK, apply);
-    else await apply();
+    await withManifestLock(apply);
+  }
+
+  // Read-merge-write: apply only this kernel's changes, so paths another tab mirrored
+  // and this kernel never saw stay in the index. With no index at all (first boot)
+  // this kernel's `meta` is the best view there is. Runs under the manifest lock.
+  async function mergeIntoIndex(batch) {
+    const index = await readManifest();
+    // An index that exists but cannot be parsed must not be replaced by this tab's
+    // partial view: that turns a transient read race into real data loss. Keep the
+    // changes queued and let a later pass (or the next boot) try again.
+    if (!index.ok) {
+      if (!manifestUnreadable) {
+        manifestUnreadable = true;
+        console.warn("[opfs] the VFS index is unreadable; keeping it rather than overwriting it");
+      }
+      throw new Error("vv-vfs: manifest unreadable");
+    }
+    manifestUnreadable = false;
+    const onDisk = index.entries ?? new Map(meta);
+    for (const [path, op] of batch) {
+      if (op === "d") onDisk.delete(path);
+      else {
+        const e = meta.get(path);
+        if (e) onDisk.set(path, e);
+        else onDisk.delete(path); // vanished between enqueue and drain
+      }
+    }
+    await replaceManifest(enc.encode(JSON.stringify([...onDisk.entries()])));
   }
 
   // ---- the write-behind queue ----------------------------------------------
@@ -360,13 +377,14 @@ export async function createOpfsPersistence({
       manifestTimer = null;
     }
     // Best-effort: a transient OPFS hiccup here must not escape as an unhandled
-    // rejection. Leave manifestDirty set so the next drain retries.
+    // rejection. The flag drops BEFORE the write, so a change the drain records while
+    // it is in flight raises it again instead of being cleared with it.
+    manifestDirty = false;
     try {
       await writeManifest();
-      manifestDirty = false;
       lastManifestWrite = Date.now();
     } catch {
-      /* retry on the next drain */
+      manifestDirty = true; // retry on the next drain
     }
   }
 
@@ -397,9 +415,12 @@ export async function createOpfsPersistence({
   // = nothing persisted yet). Runs BEFORE the FS worker serves any syscall, and
   // calls the VFS directly (via `access`), so it never re-enters the queue.
   async function restore(onProgress) {
-    // Tolerant of a concurrent writer in another tab (see readManifest): a mid-write
-    // index is retried, never mistaken for "nothing saved".
-    const index = await readManifest();
+    // Read under the manifest lock, so a tab booting while another rewrites the index
+    // waits for the write instead of racing it. Without the lock a read can land between
+    // the copy fallback's truncate and write, and the sync access handle held while
+    // reading can make the other tab's move() and its fallback both fail.
+    // readManifest still retries, for engines with no Web Locks.
+    const index = await withManifestLock(readManifest);
     if (!index.ok) {
       console.warn("[opfs] the VFS index is unreadable; starting with an empty workspace");
       return 0;
@@ -432,12 +453,10 @@ export async function createOpfsPersistence({
     if (pruneRoots.size) {
       void (async () => {
         for (const r of pruneRoots) await removePath(r);
-        manifestDirty = true;
         try {
           await writeManifest();
-          manifestDirty = false;
         } catch {
-          /* a later drain will rewrite the manifest */
+          manifestDirty = true; // a later drain will rewrite the manifest
         }
       })();
     }

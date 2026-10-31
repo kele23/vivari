@@ -4737,6 +4737,27 @@ queue is still busy. Rules if you touch it:
   `spike-opfs-delete-recreate.mjs` gates the ordering: 200 queued cache writes plus one project
   write, `flush()`, and the project file must restore while the last cache file must not.
 
+**Every tab on an origin shares this mirror, so the index is merged, never rewritten from
+one tab's view.** Each kernel records the paths it changed in `owned` and `writeManifest`
+applies only those to the index on disk, under the `vv-vfs-manifest` Web Lock (ARCHITECTURE
+§ Persistence has the whole design). Two things that look safe here and are not:
+
+- **Take the batch before the first `await`, not after the write.** The drain keeps
+  recording changes while the index is read and replaced. The first version cleared `owned`
+  and `manifestDirty` once the write finished, which silently dropped anything recorded in
+  between: the bytes were on disk, the index never listed them, and a reload lost the file.
+  Same rule for the dirty flag: lower it before writing, raise it again on failure.
+- **Anything that reads the index takes the lock too**, `restore()` included. A sync access
+  handle is exclusive, so an unlocked read can make another tab's `move()` and its copy
+  fallback fail, and an unlocked read can land between that fallback's truncate and write.
+
+`spike-opfs-multitab.mjs` drives several real persistence instances over one fake OPFS and one
+fake `navigator.locks` (`scripts/lib/fake-opfs.mjs`): tabs keeping each other's files, a
+delete staying deleted, the staged-copy fallback, an unreadable index left alone, a boot that
+waits for the lock, and a change made mid-write. Note the delete case uses a directory on
+purpose: a stale index entry for a deleted file is skipped at restore because its bytes are
+gone, so only a directory shows the resurrection.
+
 ### VFS memory: whole-file lazy compression (on by default)
 The FS worker's Wasm linear memory (all file bodies) is the largest addressable term
 in the tab. File bodies are a `FileBody { Raw | Zip{data,len} }`: cold files are stored

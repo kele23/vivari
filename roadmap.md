@@ -11751,3 +11751,34 @@ needed the caches on disk too. There is one production caller, `pagehide`, and i
 the case that must not wait. It also checked `PM_CACHE_PREFIXES` against the cache env the
 shell sets (npm, yarn, pnpm store, corepack); they match. The rules are in AGENTS.md under
 "OPFS persistence".
+
+## Several tabs share the OPFS mirror's index (PR #22 + follow-up)
+
+kele23 measured it with two real Chrome tabs on one origin. Each tab rewrote `manifest.json`
+from its own `meta`, so after tab A wrote one file the index held 0 of tab B's 10 paths and a
+reload of B lost its project. Separately, `truncate(0)` + `write()` left the index empty for a
+few milliseconds, and a tab booting in that window restored nothing.
+
+PR #22 made each kernel merge only the paths it changed (`owned`) into the index on disk under
+a `vv-vfs-manifest` Web Lock, replace the index through `manifest.json.new` + `move()`, retry
+a reader that hits a half-written index, and refuse to overwrite an index it cannot parse.
+
+The follow-up found two gaps while writing the test the PR did not have:
+
+- **A change recorded during an index write was dropped for good.** `owned` and
+  `manifestDirty` were both cleared after the write's `await`s, so a path the drain recorded
+  in the meantime (the debounce timer makes this ordinary, not exotic) had its bytes in OPFS
+  and no index entry, and was gone after a reload. The batch is now taken before the first
+  `await` and the flag lowered before the write.
+- **`restore()` read the index without the lock.** A sync access handle is exclusive, so a
+  booting tab could make the writer's `move()` and its copy fallback fail, or read between
+  that fallback's truncate and write. It now reads under the same lock.
+
+Gate: `spike-opfs-multitab.mjs` (new, offline, no Wasm), with the OPFS fakes moved to
+`scripts/lib/fake-opfs.mjs` so `spike-opfs-delete-recreate.mjs` shares them. Against the
+mirror before #22, the cross-tab and staged-copy checks fail; against #22 as merged, the
+lock and mid-write checks fail (3); with the follow-up, all pass.
+
+Not done: `vv-depcache/`'s index is one blob with the same shape of race. Two tabs installing
+at once can lose one snapshot's index entry (the blob stays). That costs a reinstall, not a
+broken tree.
