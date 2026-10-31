@@ -37,8 +37,23 @@ export default function (exports, require, module, process, internalBinding, pri
 
   // fs.js / internal/fs/utils.js call these on path arguments (mostly plain
   // strings) — preserve the pre-#8 behavior.
+  // Node's rules, because the lenient version is how a malformed URL turns into a
+  // plausible wrong path: `file://home/user/x` has host "home" and pathname
+  // "/user/x", so the old code silently returned "/user/x" (the /home gone) and the
+  // failure surfaced as ENOENT far from its cause. Real Node throws on a hostful
+  // file URL (posix) and on a non-file scheme; match it, loudly.
   function fileURLToPath(url) {
     const u = typeof url === "string" ? new URL(url) : url;
+    if (u.protocol !== "file:") {
+      const err = new TypeError("The URL must be of scheme file");
+      err.code = "ERR_INVALID_URL_SCHEME";
+      throw err;
+    }
+    if (u.hostname !== "" && u.hostname !== "localhost") {
+      const err = new TypeError('File URL host must be "localhost" or empty on posix');
+      err.code = "ERR_INVALID_FILE_URL_HOST";
+      throw err;
+    }
     const pathname = decodeURIComponent(u.pathname);
     return pathname || "/";
   }

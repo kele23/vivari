@@ -724,6 +724,24 @@ console.log("== Bun global API (node-backed) ==");
   ok(ffiThrew, "bun:ffi.dlopen throws (documented unsupported)");
 }
 
+console.log("== Bun.pathToFileURL / Bun.fileURLToPath build absolute file URLs ==");
+{
+  // A relative path must resolve against cwd, never become the URL host: with
+  // "file://" + "home/user/x" the host is "home" and the pathname loses /home — the
+  // same silent wrong path that made a PGlite ESM import fail with ENOENT.
+  const proc = { env: {}, argv: ["bun"], cwd: () => "/home/user/projects/app", stdout: process.stdout, stderr: process.stderr, stdin: process.stdin };
+  const { Bun } = createBunRuntime({ process: proc, Buffer, require: nodeRequire });
+  const rel = Bun.pathToFileURL("src/index.ts");
+  ok(rel.href === "file:///home/user/projects/app/src/index.ts", "a relative path resolves against cwd (" + rel.href + ")");
+  ok(rel.host === "" && rel.pathname === "/home/user/projects/app/src/index.ts", "…and the URL has no host");
+  ok(Bun.pathToFileURL("/home/user/x y.js").href === "file:///home/user/x%20y.js", "an absolute path is percent-encoded");
+  ok(Bun.fileURLToPath("file:///home/user/projects/app/src/index.ts") === "/home/user/projects/app/src/index.ts", "fileURLToPath converts a three-slash file URL");
+  ok(Bun.fileURLToPath(rel) === "/home/user/projects/app/src/index.ts", "…and accepts the URL object pathToFileURL returned");
+  let hostCode = null;
+  try { Bun.fileURLToPath("file://home/user/x"); } catch (e) { hostCode = e.code; }
+  ok(hostCode === "ERR_INVALID_FILE_URL_HOST", "a hostful file URL throws instead of dropping the host (" + hostCode + ")");
+}
+
 // A Bun global with no kernel, for the pure-function checks below.
 function freshBun() {
   const proc = { env: {}, argv: ["bun"], cwd: () => "/", stdout: process.stdout, stderr: process.stderr, stdin: process.stdin };
