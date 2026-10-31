@@ -604,8 +604,10 @@ export async function createOpfsPersistence({
     // entries under the requested roots that this kernel has never seen, so opening
     // a fresh cross-tab project does not need a reload first. Local changes that are
     // still queued are skipped: re-reading the index must not resurrect a path this
-    // tab has already deleted or is in the middle of rewriting.
-    const index = await readManifest();
+    // tab has already deleted or is in the middle of rewriting. Read under the manifest
+    // lock for the same reason restore() does: a sync access handle on the index while
+    // another tab replaces it can make that tab's move() and copy fallback both fail.
+    const index = await withManifestLock(readManifest);
     if (index.ok && index.entries) {
       for (const [path, m] of index.entries) {
         if (!within(path) || meta.has(path) || materialized.has(path)) continue;
