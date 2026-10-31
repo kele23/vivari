@@ -27,9 +27,8 @@ upstream as small PRs, everything else is justified and recorded here.
 - Both branch from upstream `master` at `890c5f0` (the v1.2.0 line).
 - `8754dd5` cannot go upstream alone: it fixes `hydrate()`, which only exists after
   `54d4dfa`.
-- `a34c205` (npm 12.2.1) is a chore coupled to `a3caed5`; it is also an incomplete bump — the
-  version gates in `scripts/spike-npm.mjs` / `scripts/spike-npm-studio.mjs` and the vendor
-  provisioning in `scripts/run-spikes.mjs` still say 10.9.2.
+- `a34c205` (npm 12.2.1) is a chore coupled to `a3caed5`; the bump was completed in
+  `50a5c8f` (version gates, vendor provisioning and current-state docs now match the pin).
 
 ## Removed fork-only work
 
@@ -37,6 +36,12 @@ upstream as small PRs, everything else is justified and recorded here.
   local-tarball templates and had no contract, consumer, test or changeset here. A downstream
   embedder can pass bytes through the create message's `files` (`writeFilesBatch` already
   accepts them).
+
+## Branch hygiene
+
+The five `fix/*` branches merged upstream (PRs #19–#23) and the `facilis/pre-v1.1.5`
+pre-rebase backup were deleted from `origin` on 2026-10-31. `facilis/main`, `master` and
+the two open-PR branches remain; delete those when their PRs merge.
 
 ## Syncing with upstream
 
