@@ -4559,19 +4559,6 @@ also unchanged.
   still can't truly block its importer (the "only the ENTRY can block on TLA" rule
   above), but it now at least *compiles* instead of throwing at load. Proven by
   `scripts/spike-esm.mjs`.
-- **`import.meta.url` must be built from an ABSOLUTE id.** `"file://" + id` is a
-  three-slash file URL only when `id` starts with `/`; a relative id
-  (`home/user/…`) makes its first segment the URL **host**, so
-  `new URL('./pglite.data', import.meta.url)` resolves to `file://home/user/…` and
-  `fileURLToPath()` returns `/user/…` — `/home` is gone. PGlite's ESM build locates
-  its `.data`/`.wasm` that way, so the database died with ENOENT while the stack
-  frame (built by `sourceUrlFor()` from the same id) looked right: the mismatch is
-  invisible. `fileMetaPath()` root-relativises a relative id exactly as
-  `sourceUrlFor()` does for frames, and `fileURLToPath` now throws
-  `ERR_INVALID_FILE_URL_HOST`/`ERR_INVALID_URL_SCHEME` instead of converting a
-  malformed URL into a plausible wrong path. Regression: `scripts/spike-esm.mjs`
-  sections 8–9.
-
 - **`esm.js` does NOT strip TypeScript types** — it only rewrites `import`/`export`.
   A raw `.ts` run through OC's loader (`node --experimental-strip-types x.ts`) is
   *not* type-stripped: `esm.js` removes the leading `export `/`import ` and leaves
