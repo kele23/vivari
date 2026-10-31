@@ -43,6 +43,11 @@ This checkout is `kele23/vivari`, a fork of upstream; the full record is
   either.
 - **Upstream PRs: simple, self-contained fixes only**, and anything that changes the public SDK
   surface is discussed in an upstream issue first and stays fork-only until then.
+- **`facilis/main` stays rebased on `upstream/master`, and `master` is exactly upstream.**
+  Realigning is a standing task, not a cleanup: after every batch of changes (and whenever
+  upstream moves) run the sync block in [`FORK.md`](./FORK.md), then
+  `git push --force-with-lease origin facilis/main`. The downstream product pins this branch,
+  so a stale fork is a fix it cannot test.
 
 ## Folder structure
 

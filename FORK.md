@@ -39,17 +39,22 @@ upstream as small PRs, everything else is justified and recorded here.
 ## Upstream work
 
 - [#29](https://github.com/maitrungduc1410/vivari/pull/29) — `fix(runtime): skip comments
-  between export and its declaration` (`c9a9ecc`, branch `fix/esm-comment-after-export`).
+  between export and its declaration`. **Merged**; the fork's copy (`c9a9ecc`) drops out on
+  rebase.
 - [#30](https://github.com/maitrungduc1410/vivari/pull/30) — `fix(vendor): rebuild a pack whose
-  stamped version no longer matches` (`7483504`, branch `fix/vendor-stale-pack-version`).
-- [#31](https://github.com/maitrungduc1410/vivari/pull/31) — `fix(runtime): never let a relative
-  path become a file URL host` (`9184ee5` + `36c9714`, branch `fix/file-url-host`). Fixes the
-  fork's issue #1 (`import.meta.url` gaining a bogus host).
-- All three are rebased on the `v1.2.0` tag (`9c87dec`).
-- Not opened yet: the hostful-`file:` recovery above. It belongs in the re-opened
-  `fix/file-url-host-v2` PR the maintainer asked for after reverting #31, whose
-  `fileURLToPath` hunk currently promises Node's throw — the PR and this decision have to land
-  together (the alternative is an upstream issue first, per policy).
+  stamped version no longer matches` (branch `fix/vendor-stale-pack-version`, based on
+  `upstream/master`). Open, and it is only the stale-pack guard: `NPM_VERSION` is back to
+  10.9.2 in that branch after the maintainer's review.
+- [#31](https://github.com/maitrungduc1410/vivari/pull/31) / [#32](https://github.com/maitrungduc1410/vivari/pull/32) —
+  `fix(runtime): never let a relative path become a file URL host`, merged and then reverted
+  upstream. Superseded by #35.
+- [#35](https://github.com/maitrungduc1410/vivari/pull/35) — `fix(runtime): keep file: URLs
+  host-free, and recover the path when a parser adds one` (branch `fix/file-url-host-v2`,
+  based on `upstream/master`). Restores #31's content, applies its review feedback (a literal
+  `%` in `pathToFileURL`), and adds the hostful-`file:` recovery recorded above; the Windows
+  reporter confirmed the fix on their machine. When it merges, drop the matching fork commits
+  and the two `file-url-*` changesets on the next rebase.
+- Rebased on `upstream/master` (`a9e3aac`, 2026-10-31, after #29 merged and #31 was reverted).
 - `1fc1094` cannot go upstream alone: it fixes `hydrate()`, which only exists after
   `8fd62fe`.
 - npm 12 is **not** in this fork: `c8ae8ed` + `9aa7682` (the 12.2.1 pin, its gates and its
@@ -87,15 +92,27 @@ the three open-PR branches remain; delete those when their PRs merge.
 
 ## Syncing with upstream
 
+**This is a standing task, not a one-off: realign after every batch of changes and whenever
+`upstream/master` moves.** `master` must stay exactly at `upstream/master` (it is the sync
+base, nothing is committed on it), and `facilis/main` must be rebased on top of it — the
+downstream product pins this branch, so a stale fork means the fix it is testing may not be in
+the tree. Replay drops a fork commit whose patch upstream already merged; that is the signal
+the PR landed.
+
 ```sh
 git fetch upstream
-git rebase upstream/master      # fork-only commits stay on top
-npm run spikes:offline          # after npm install; Wasm spikes need npm run build
+git branch -f master upstream/master          # master tracks upstream exactly
+git checkout facilis/main
+git rebase upstream/master                     # fork-only commits stay on top
+node scripts/spike-esm.mjs                     # the offline gates that need no install
+node scripts/spike-bun-offline.mjs
+npm run spikes:offline                         # after npm install; Wasm spikes need npm run build
+git push --force-with-lease origin facilis/main
 ```
 
-Realigned onto the `v1.2.0` tag (`9c87dec`) on 2026-10-31: the fork-only commits are
-replayed on top, `e2f4246` stays out, and its revert commit is gone with it. When a PR
-merges upstream, drop its commit from the replay.
+Realigned onto `upstream/master` (`a9e3aac`) on 2026-10-31: #29's merge dropped the fork's
+copy of it, #31's revert dropped nothing (the fork never carried the throw), and the 18
+remaining fork-only commits were replayed on top.
 
 Upstream `v1.2.0` is itself red in CI: `toolchain-gate`/`toolchain-floor` fail in the
 `ci-tiers` spike (the `needsWasm` spike-wiring check), the same failure as on `master` at
