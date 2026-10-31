@@ -2952,28 +2952,6 @@ self.onmessage = async (event) => {
         const lock = await fetchTemplateLock(m.manifest.id);
         if (lock) files["package-lock.json"] = lock;
       }
-      // A template may ship binary files beside its sources — a project that installs
-      // from local packages instead of a registry needs its tarballs on disk, not
-      // behind a URL the guest's own HTTP client would have to reach. The manifest
-      // lists them as [{ path, asset }]: `path` is project-relative, `asset` is
-      // vendor-relative and fetched HERE, in the page and same origin as the studio,
-      // then written inside the same batch as the text files. An asset that misses
-      // (a 404, or the SPA's 200-with-HTML fallback) fails the create, because a
-      // project scaffolded without its tarballs fails later, far from the cause.
-      const assets = Array.isArray(m.manifest?.assets) ? m.manifest.assets : [];
-      if (assets.length) {
-        const fetched = await Promise.all(
-          assets.map(async (a) => {
-            const res = await fetch(vendorUrl(String(a.asset)));
-            const type = res.headers.get("content-type") || "";
-            if (!res.ok || /text\/html/.test(type)) {
-              throw new Error(`template asset ${a.asset}: HTTP ${res.status} ${type}`);
-            }
-            return [String(a.path), new Uint8Array(await res.arrayBuffer())];
-          }),
-        );
-        for (const [rel, bytes] of fetched) files[rel] = bytes;
-      }
       const batch = Object.entries(files).map(([rel, contents]) => ({ path: dir + "/" + rel, contents }));
       if (batch.length) await kernel.writeFilesBatch(batch);
       if (m.manifest) registerProject(dir, m.manifest, m.title);
