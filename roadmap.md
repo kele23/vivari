@@ -11889,3 +11889,18 @@ engine and takes `VV_PNPM_VERSION`, so it can be pointed at an 11.x tree to re-m
 Two smaller pnpm 11 facts for whoever picks it up: it reads `pnpm_config_*` environment
 variables, not `npm_config_*` (the studio's store-dir and import-method settings use the
 latter), and `bin/pnpm.mjs` loads the bundle with a top-level `await import()`.
+
+## A comment between `export` and its declaration broke every zod route (this change)
+
+The ESM→CJS transpiler's `scanExportEdits` skipped whitespace after `export`, then
+decided whether a real export form followed. Comments are legal between any two tokens,
+and zod v4's build emits `export /*@__NO_SIDE_EFFECTS__*/ function`: the scanner read the
+comment's `/`, concluded "not an export", and left the keyword in the CJS body. The
+module then failed to compile as both a plain and an async function, so every route that
+imported zod died inside the WebContainer with `Unexpected token 'export' (while
+compiling .../zod/v4/core/core.js [esm])` — found when a Nitro server route imported zod in-VM.
+
+`scanExportEdits` now advances over whitespace **and** comments (`skipSpaceAndComments`)
+before deciding, which covers `export /*c*/ function`, `export /*c*/ const`, a line
+comment and `export /*c*/ default`. The regression case in `scripts/spike-esm.mjs`
+asserts the rewritten source has no bare `export`, compiles, and exports all four forms.
