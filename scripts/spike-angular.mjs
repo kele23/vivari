@@ -19,7 +19,7 @@
 // through our loader.
 //
 //   1) vendor npm:  rm -rf /tmp/vv-vendor && mkdir -p /tmp/vv-vendor \
-//        && (cd /tmp/vv-vendor && npm install npm@10.9.2 --no-save --no-audit --no-fund)
+//        && (cd /tmp/vv-vendor && npm install npm@12.2.1 --no-save --no-audit --no-fund)
 //   2) run (Node 22+):  node scripts/spike-angular.mjs   (VV_LIVE=1 to stream)
 
 import { Kernel } from "../packages/kernel-host/kernel.js";

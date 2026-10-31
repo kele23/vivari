@@ -9,7 +9,7 @@
 //      worker calls), and
 //   2) typing `npm`/`npx` on PATH resolves to the real CLI through the /bin
 //      shims (NOT the Turbo-analog) — the analog would print a usage line for
-//      `npm --version`, real npm prints 10.9.2.
+//      `npm --version`, real npm prints 12.2.1.
 //
 // Offline by default (version + shim gates). Set VV_NET=1 for the install gate
 // (hits registry.npmjs.org). Run: node scripts/spike-npm-studio.mjs
@@ -95,16 +95,16 @@ console.log(`shim gate: ${shimOk ? "PASS" : "FAIL"}  (/bin/npm.js -> real npm-cl
 
 const env = { HOME: "/home/user", PATH: "/bin", npm_config_cache: "/tmp/.npm" };
 
-// Gate B: `npm --version` resolved via PATH -> /bin/npm.js -> real npm == 10.9.2.
+// Gate B: `npm --version` resolved via PATH -> /bin/npm.js -> real npm == 12.2.1.
 // (The analog prints a usage line here, so this proves the real CLI is running.)
 const v = await kernel.start("npm", ["--version"], { cwd: "/app", env, capture: true });
-const versionOk = v.code === 0 && /^\s*10\.9\.2\s*$/.test(v.stdout || "");
+const versionOk = v.code === 0 && /^\s*12\.2\.1\s*$/.test(v.stdout || "");
 console.log(`version gate: ${versionOk ? "PASS" : "FAIL"}  npm --version -> ${JSON.stringify((v.stdout || "").trim())}`);
 if (!versionOk && v.stderr) console.log("stderr:\n" + v.stderr.trim());
 
 // Gate C: `npx --version` resolves via the /bin/npx.js shim too.
 const nx = await kernel.start("npx", ["--version"], { cwd: "/app", env, capture: true });
-const npxOk = nx.code === 0 && /^\s*10\.9\.2\s*$/.test(nx.stdout || "");
+const npxOk = nx.code === 0 && /^\s*12\.2\.1\s*$/.test(nx.stdout || "");
 console.log(`npx gate: ${npxOk ? "PASS" : "FAIL"}  npx --version -> ${JSON.stringify((nx.stdout || "").trim())}`);
 
 // Gate D (opt-in, network): a real install through the shim on PATH.

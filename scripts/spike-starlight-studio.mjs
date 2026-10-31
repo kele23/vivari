@@ -32,7 +32,7 @@
 //   4) `npm run dev` (again via the shim) binds the port and serves the Starlight shell.
 //
 // Run (Node 22+):  node scripts/spike-starlight-studio.mjs
-//   Prereq: the vendor asset — `npm run vendor:npm` (packs npm@10.9.2 into
+//   Prereq: the vendor asset — `npm run vendor:npm` (packs npm@12.2.1 into
 //   packages/studio/public/vendor/npm-pack.bin, the same bytes the browser fetches).
 //   env: VV_LIVE=1 (stream output), VV_INSTALL_TIMEOUT, VV_KEEP_SCRIPTS=1 (see below).
 

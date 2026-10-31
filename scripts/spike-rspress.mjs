@@ -28,7 +28,7 @@
 // same split scripts/spike-docusaurus.mjs uses for VV_BASEURL.
 //
 //   1) vendor npm:  rm -rf /tmp/vv-vendor && mkdir -p /tmp/vv-vendor \
-//        && (cd /tmp/vv-vendor && npm install npm@10.9.2 --no-save --no-audit --no-fund)
+//        && (cd /tmp/vv-vendor && npm install npm@12.2.1 --no-save --no-audit --no-fund)
 //   2) run (Node 22+):  node scripts/spike-rspress.mjs
 //      env: VV_LIVE=1 (stream), VV_INSTALL_ONLY=1, VV_BASE=/preview/3000/, VV_PORT.
 

@@ -7,7 +7,7 @@
 // the host, provisioned from the live registry:
 //
 //   rm -rf /tmp/vv-vendor && mkdir -p /tmp/vv-vendor \
-//     && (cd /tmp/vv-vendor && npm install npm@10.9.2 --no-save --no-audit --no-fund)
+//     && (cd /tmp/vv-vendor && npm install npm@12.2.1 --no-save --no-audit --no-fund)
 //
 // …and it is loaded LAZILY, at the moment something needs it, rather than at
 // boot. It used to load at boot, which quietly made every kernel a
@@ -135,7 +135,7 @@ export async function bootSpikeKernel({ npm = false } = {}) {
       console.error(`No vendored npm at ${VENDOR_NPM} (expected bin/npm-cli.js).`);
       console.error(
         "Vendor it:  rm -rf /tmp/vv-vendor && mkdir -p /tmp/vv-vendor && " +
-          "(cd /tmp/vv-vendor && npm install npm@10.9.2 --no-save --no-audit --no-fund)",
+          "(cd /tmp/vv-vendor && npm install npm@12.2.1 --no-save --no-audit --no-fund)",
       );
       process.exit(2);
     }

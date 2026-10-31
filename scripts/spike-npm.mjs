@@ -202,7 +202,7 @@ console.log(`exit=${v.code}  (${Date.now() - t1}ms)`);
 console.log("stdout:", JSON.stringify(v.stdout));
 if (v.stderr && v.stderr.trim()) console.log("stderr:\n" + v.stderr);
 
-const versionOk = v.code === 0 && /^\s*10\.9\.2\s*$/.test(v.stdout || "");
+const versionOk = v.code === 0 && /^\s*12\.2\.1\s*$/.test(v.stdout || "");
 console.log("version gate: " + (versionOk ? "PASS" : "FAIL"));
 
 // ── https shim self-test (isolate the shim from npm's plumbing) ──────────────
