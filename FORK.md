@@ -24,7 +24,10 @@ upstream as small PRs, everything else is justified and recorded here.
   between export and its declaration` (`c9a9ecc`, branch `fix/esm-comment-after-export`).
 - [#30](https://github.com/maitrungduc1410/vivari/pull/30) — `fix(vendor): rebuild a pack whose
   stamped version no longer matches` (`7483504`, branch `fix/vendor-stale-pack-version`).
-- Both are rebased on the `v1.2.0` tag (`9c87dec`).
+- [#31](https://github.com/maitrungduc1410/vivari/pull/31) — `fix(runtime): never let a relative
+  path become a file URL host` (`9184ee5` + `36c9714`, branch `fix/file-url-host`). Fixes the
+  fork's issue #1 (`import.meta.url` gaining a bogus host).
+- All three are rebased on the `v1.2.0` tag (`9c87dec`).
 - `1fc1094` cannot go upstream alone: it fixes `hydrate()`, which only exists after
   `8fd62fe`.
 - `c8ae8ed` (npm 12.2.1) is a chore coupled to `c20e0e9`; the bump was completed in
@@ -41,7 +44,7 @@ upstream as small PRs, everything else is justified and recorded here.
 
 The five `fix/*` branches merged upstream (PRs #19–#23) and the `facilis/pre-v1.1.5`
 pre-rebase backup were deleted from `origin` on 2026-10-31. `facilis/main`, `master` and
-the two open-PR branches remain; delete those when their PRs merge.
+the three open-PR branches remain; delete those when their PRs merge.
 
 ## Syncing with upstream
 
@@ -54,3 +57,7 @@ npm run spikes:offline          # after npm install; Wasm spikes need npm run bu
 Realigned onto the `v1.2.0` tag (`9c87dec`) on 2026-10-31: the fork-only commits are
 replayed on top, `e2f4246` stays out, and its revert commit is gone with it. When a PR
 merges upstream, drop its commit from the replay.
+
+Upstream `v1.2.0` is itself red in CI: `toolchain-gate`/`toolchain-floor` fail in the
+`ci-tiers` spike (the `needsWasm` spike-wiring check), the same failure as on `master` at
+`9c87dec`, so it is not caused by this fork's changes.
