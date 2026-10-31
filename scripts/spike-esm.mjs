@@ -19,6 +19,7 @@
 // Run:  node scripts/spike-esm.mjs
 
 import { transpileEsm, transpileEsmLive } from "../packages/runtime/esm.js";
+import urlFactory from "../packages/runtime/node/internal/url.js";
 
 const AsyncFunction = Object.getPrototypeOf(async function () {}).constructor;
 let failures = 0;
@@ -319,6 +320,65 @@ console.log("\n== [esm] comment between `export` and its declaration ==");
     namedOk = false;
   }
   check("a commented default function keeps its local binding", namedOk);
+}
+
+// ── 8. a relative module id must never become the URL host ────────────────────
+// `"file://" + id` is a three-slash file URL only when the id is absolute. With a
+// relative id ("home/user/…") the first segment parses as the HOST, so
+// `new URL('./pglite.data', import.meta.url)` resolves to file://home/user/… and
+// fileURLToPath() returns /user/… — the /home is gone. That is how a PGlite ESM
+// import failed with ENOENT while its stack frame looked right.
+console.log("\n== [esm] relative module id must not become import.meta.url's host ==");
+{
+  const src = "export const url = import.meta.url; export const dir = import.meta.dirname;";
+  const out = transpileEsm(src, "home/user/projects/app/node_modules/@electric-sql/pglite/dist/index.js");
+  const mod = { exports: Object.create(null) };
+  new Function("__oc_exports", "__oc_require", "__oc_module", out + "\n").call(
+    mod.exports,
+    mod.exports,
+    () => ({}),
+    mod,
+  );
+  const u = mod.exports.url;
+  check(
+    "import.meta.url is a three-slash file URL",
+    u === "file:///home/user/projects/app/node_modules/@electric-sql/pglite/dist/index.js",
+  );
+  check(
+    "a relative asset resolves under /home, not /user",
+    new URL("./pglite.data", u).pathname ===
+      "/home/user/projects/app/node_modules/@electric-sql/pglite/dist/pglite.data",
+  );
+  check(
+    "import.meta.dirname is absolute too",
+    mod.exports.dir === "/home/user/projects/app/node_modules/@electric-sql/pglite/dist",
+  );
+  check(
+    "the live-binding variant builds the same URL",
+    transpileEsmLive(src, "home/user/projects/app/x.js").includes('"file:///home/user/projects/app/x.js"'),
+  );
+}
+
+// ── 9. fileURLToPath refuses a hostful file URL ───────────────────────────────
+// The lenient shim was the other half: it turned the malformed URL into a
+// plausible-looking /user/… path instead of failing. Real Node throws
+// ERR_INVALID_FILE_URL_HOST on posix; match it so this class fails at the URL.
+console.log("\n== [url] fileURLToPath rejects a host instead of silently dropping it ==");
+{
+  const mod = { exports: {} };
+  urlFactory(mod.exports, () => { throw new Error("require is not available here"); }, mod, {}, {}, {});
+  const { fileURLToPath } = mod.exports;
+  let code = null;
+  try {
+    fileURLToPath("file://home/user/projects/x");
+  } catch (e) {
+    code = e.code;
+  }
+  check("a hostful file URL throws ERR_INVALID_FILE_URL_HOST", code === "ERR_INVALID_FILE_URL_HOST");
+  check(
+    "a three-slash file URL still converts",
+    fileURLToPath("file:///home/user/projects/x") === "/home/user/projects/x",
+  );
 }
 
 console.log(`\nRESULT: ${failures === 0 ? "PASS — esm.js live-binding + TLA loader guarantees hold" : `FAIL — ${failures} check(s) failed`}`);
