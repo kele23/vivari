@@ -22,8 +22,9 @@ upstream as small PRs, everything else is justified and recorded here.
 
 - [#29](https://github.com/maitrungduc1410/vivari/pull/29) — `fix(runtime): skip comments
   between export and its declaration` (`8be8a96`, branch `fix/esm-comment-after-export`).
-- `b7eb616` (`fix(vendor): rebuild a pack whose stamped version no longer matches`) is a
-  candidate; not proposed yet.
+- [#30](https://github.com/maitrungduc1410/vivari/pull/30) — `fix(vendor): rebuild a pack whose
+  stamped version no longer matches` (`b7eb616`, branch `fix/vendor-stale-pack-version`).
+- Both branch from upstream `master` at `890c5f0` (the v1.2.0 line).
 - `8754dd5` cannot go upstream alone: it fixes `hydrate()`, which only exists after
   `54d4dfa`.
 - `a34c205` (npm 12.2.1) is a chore coupled to `a3caed5`; it is also an incomplete bump — the
@@ -44,3 +45,8 @@ git fetch upstream
 git rebase upstream/master      # fork-only commits stay on top
 npm run spikes:offline          # after npm install; Wasm spikes need npm run build
 ```
+
+Upstream moved to `890c5f0` on 2026-10-31 (release/v1.2.0 created), so `facilis/main` is
+behind until the next realignment. When rebasing, drop `8be8a96`/`b7eb616` if their PRs
+merged, and keep `e2f4246` out of the replay (its revert commit becomes empty and is dropped
+too).
