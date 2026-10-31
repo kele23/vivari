@@ -14,6 +14,16 @@ upstream as small PRs, everything else is justified and recorded here.
   - `BootOptions.deferCacheFiles` (`7725413`)
   - pnpm config moved out of the base process environment (`c20e0e9`) — it matters only
     with the vendored npm 12 pin, which upstream does not carry.
+- **Scope: the whole project except `packages/studio`.** The Studio IDE app is the downstream
+  product's business: it keeps its own fork of it (`ide/` in `facilis-dev/facilis`) and its
+  own copy of the preview Service Worker (`ide/public/sw.js`). One coupling to know —
+  `@vivari/core` vendors `packages/studio/public/sw.js` into `dist/assets/sw.js` at build
+  time, so the preview SW ships with core even though its canonical copy lives in studio, which
+  makes a preview-SW fix IDE-side **by decision, not by architecture**.
+- **Signalling the downstream means a GitHub issue in `facilis-dev/facilis`, never a change to
+  its files.** A finding that belongs to the IDE is reported there (diagnosis, repro, design,
+  patch in the body) and implemented there; this working tree, the downstream's working tree
+  and the submodule worktree are all left alone.
 - **No downstream-specific code in this repository.** Product templates, assets, probes or
   branding belong to the downstream product, which pins this fork as a submodule.
 - Fork-only commits keep changesets while they touch `@vivari/core`.
@@ -39,6 +49,19 @@ upstream as small PRs, everything else is justified and recorded here.
   local-tarball templates and had no contract, consumer, test or changeset here. A downstream
   embedder can pass bytes through the create message's `files` (`writeFilesBatch` already
   accepts them).
+
+## Downstream (Facilis) work
+
+Reported there as issues, never implemented here:
+
+- [#4](https://github.com/facilis-dev/facilis/issues/4) — preview Service Worker: a reload can
+  serve the other IDE tab's project once Chrome evicts the idle worker. The routing state is in
+  SW memory only (`frameKernel`, `kernelByToken`, `kernelHostIds`, per-tab keep-prefix) and
+  nothing re-announces an open page (`vv-kernel-host` is sent at registration and on
+  `controllerchange`, not per `listen`), so after an eviction every preview request falls back
+  to `pickKernelClient`; with two tabs both serving 5173 the wrong one answers 200. The issue
+  carries the diagnosis, the repro, the design and a patch against `ide/public/sw.js`. No change
+  kept here (scope: `packages/studio`); the spike work that gated it was reverted with it.
 
 ## Branch hygiene
 
