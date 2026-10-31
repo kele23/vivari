@@ -1851,6 +1851,23 @@ console.log("== import.meta: the Node members are unconditional, Bun's are gated
   const nodeMeta = evalMeta(src, stubRequire, entry);
   ok(nodeMeta.url === "file:///app/src/index.ts" && nodeMeta.filename === "/app/src/index.ts", "url + filename unchanged for a plain node process");
   ok(nodeMeta.dirname === "/app/src" && typeof nodeMeta.resolve === "function", "dirname + resolve unchanged too");
+
+  // Node parity: resolve() returns a URL string, not the path require.resolve gives.
+  // The loader's own prelude used to hand back the path, so code that does
+  // fileURLToPath(import.meta.resolve(…)) — Nitro's node-worker/node-process runners,
+  // among others — threw "Invalid URL" on a perfectly resolvable module.
+  const urlRequire = () => ({});
+  urlRequire.resolve = (s) =>
+    s === "fs" || s === "fs/promises"
+      ? s
+      : s === "./sibling.ts"
+        ? "/app/src/sibling.ts"
+        : "/app/node_modules/pkg/index.js";
+  const urlMeta = evalMeta(src, urlRequire, entry);
+  ok(urlMeta.resolve("./sibling.ts") === "file:///app/src/sibling.ts", "import.meta.resolve returns a file: URL for a relative specifier");
+  ok(urlMeta.resolve("pkg") === "file:///app/node_modules/pkg/index.js", "…and for a bare package specifier");
+  ok(urlMeta.resolve("fs") === "node:fs", "…and node: for a core builtin");
+  ok(urlMeta.resolve("fs/promises") === "node:fs/promises", "…including a builtin subpath");
   // The gate, stated as a behaviour: `import.meta.env` must NOT exist under node.
   // Vite SSR code reads `import.meta.env.MODE`; today that throws a TypeError it
   // can act on, and an always-on alias of process.env would make it read

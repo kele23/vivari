@@ -106,7 +106,14 @@ export function importMetaSource(fileUrl, filename) {
     "const __oc_meta={url:" + J(fileUrl) +
       ",filename:" + J(fp) +
       ",dirname:" + J(dir) +
-      ",resolve:function(s){return __oc_require.resolve?__oc_require.resolve(s):s;}};" +
+      // Node's import.meta.resolve returns a URL STRING (file://… for a file, node:fs for
+      // a builtin), not the path require.resolve hands back. Tools do
+      // fileURLToPath(import.meta.resolve(…)) and die on a bare path — Nitro's
+      // node-worker/node-process dev runners are the case that surfaced this.
+      ",resolve:function(s){var r=__oc_require.resolve?__oc_require.resolve(s):s;" +
+        "if(r.charAt(0)==='/')return 'file://'+r.split('/').map(encodeURIComponent).join('/');" +
+        "if(r.indexOf('node:')===0)return r;" +
+        "return 'node:'+r;}};" +
     "if(globalThis.Bun){" +
       // path/dir/file are Bun's names for filename/dirname/basename. `.file` is
       // the basename WITH its extension ("index.tsx"), per Bun's docs.
