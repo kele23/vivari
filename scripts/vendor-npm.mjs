@@ -31,7 +31,7 @@ import {
 } from "../packages/kernel-host/node-gyp-stub.js";
 import { readPackVersion } from "./lib/pack-version.mjs";
 
-const NPM_VERSION = "12.2.1"; // keep in sync with scripts/spike-npm.mjs
+const NPM_VERSION = "10.9.2"; // keep in sync with scripts/spike-npm.mjs
 const ROOT = path.resolve(fileURLToPath(new URL("../", import.meta.url)));
 const VENDOR_DIR = process.env.VV_VENDOR_DIR || "/tmp/vv-vendor";
 const VENDOR_NPM = path.join(VENDOR_DIR, "node_modules", "npm");

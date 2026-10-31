@@ -18,7 +18,7 @@
 //   3) `rspack serve` binds its port and GET / -> 200 with the page marker.
 //
 //   1) vendor npm:  rm -rf /tmp/vv-vendor && mkdir -p /tmp/vv-vendor \
-//        && (cd /tmp/vv-vendor && npm install npm@12.2.1 --no-save --no-audit --no-fund)
+//        && (cd /tmp/vv-vendor && npm install npm@10.9.2 --no-save --no-audit --no-fund)
 //   2) run (Node 22+):  node scripts/spike-rspack.mjs
 //      env: VV_LIVE=1 (stream output), VV_INSTALL_ONLY=1 (stop after install),
 //           VV_NO_SERVE=1 (stop after build), VV_WSPROBE=1 (HMR ws probe).
@@ -35,7 +35,7 @@ const VENDOR_NPM = process.argv[2] || "/tmp/vv-vendor/node_modules/npm";
 const VFS_NPM = "/usr/lib/node_modules/npm";
 if (!fs.existsSync(path.join(VENDOR_NPM, "bin/npm-cli.js"))) {
   console.error(`No vendored npm at ${VENDOR_NPM} (expected bin/npm-cli.js).`);
-  console.error(`Vendor it:  rm -rf /tmp/vv-vendor && mkdir -p /tmp/vv-vendor && (cd /tmp/vv-vendor && npm install npm@12.2.1 --no-save --no-audit --no-fund)`);
+  console.error(`Vendor it:  rm -rf /tmp/vv-vendor && mkdir -p /tmp/vv-vendor && (cd /tmp/vv-vendor && npm install npm@10.9.2 --no-save --no-audit --no-fund)`);
   process.exit(2);
 }
 

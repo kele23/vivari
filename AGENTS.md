@@ -2559,7 +2559,7 @@ highlighting only, no worker, no language service, so listing one costs nothing.
 
 ### Real npm is the studio shell's `npm` (delivery + shims)
 The North Star is running the real npm/yarn/pnpm CLIs, not our from-scratch
-`programs/npm.js`. In the studio that is now live: real npm@12.2.1 is vendored
+`programs/npm.js`. In the studio that is now live: real npm@10.9.2 is vendored
 and packed into one gzipped asset (`scripts/vendor-npm.mjs` →
 `packages/studio/public/vendor/npm-pack.bin`, gitignored, built by
 `npm run vendor:npm`, auto-run as `predev`/`prebuild:studio`). At boot the kernel

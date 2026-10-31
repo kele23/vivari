@@ -368,7 +368,7 @@ only wired when `VV_DEBUG` is set, so non-debug runs never allocate it.
   The kernel worker watches `onListen` on the demo's port to point/reload the
   preview (a re-listen on an already-serving port = a Nest `--watch` restart).
 - **npm**: the shell's `npm`/`npx` is the **real, unmodified npm CLI** on Path B
-  (the North Star; see roadmap). Real npm@12.2.1 is vendored + packed into one
+  (the North Star; see roadmap). Real npm@10.9.2 is vendored + packed into one
   gzipped asset (`scripts/vendor-npm.mjs` →
   `packages/studio/public/vendor/npm-pack.bin`); at boot the kernel worker fetches
   it once and `load-real-npm.js` unpacks the tree into the VFS at

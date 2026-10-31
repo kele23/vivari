@@ -12,8 +12,10 @@ upstream as small PRs, everything else is justified and recorded here.
 - **Fork-only, by decision:**
   - `BootOptions.deferRestoreRoots` / `vv-restore-roots` (`8fd62fe`)
   - `BootOptions.deferCacheFiles` (`7725413`)
-  - pnpm config moved out of the base process environment (`c20e0e9`) — it matters only
-    with the vendored npm 12 pin, which upstream does not carry.
+  - pnpm config moved out of the base process environment (`c20e0e9`) — the
+    `npm_config_*` names pnpm reads are npm's too, so every other process inherited them
+    (npm warns about unknown config, and a future major turns that warning into an error).
+    Independent of which npm is vendored.
   - hostful `file:` URL recovery in `fileURLToPath` / `Bun.fileURLToPath` / `Bun.file(URL)`
     (`packages/runtime/node/internal/url.js`, `builtins/bun.js`, `builtins/bun-file.js`) — the
     one deliberate deviation from Node, which throws on posix. Chromium's `file:` parser is
@@ -50,8 +52,12 @@ upstream as small PRs, everything else is justified and recorded here.
   together (the alternative is an upstream issue first, per policy).
 - `1fc1094` cannot go upstream alone: it fixes `hydrate()`, which only exists after
   `8fd62fe`.
-- `c8ae8ed` (npm 12.2.1) is a chore coupled to `c20e0e9`; the bump was completed in
-  `9aa7682` (version gates, vendor provisioning and current-state docs now match the pin).
+- npm 12 is **not** in this fork: `c8ae8ed` + `9aa7682` (the 12.2.1 pin, its gates and its
+  vendor instructions) are reverted in `revert(vendor): keep the vendored npm at 10.9.2`. The
+  upstream reviewer asked for exactly that on PR #30 — an npm major bump is not part of a
+  pack-version fix, and it "deserves its own PR with the spikes run against it". So npm 12
+  comes back as its own change, with `spike-npm`/`spike-npm-studio` and the template spikes
+  run on 12 first.
 
 ## Removed fork-only work
 

@@ -13,7 +13,7 @@
 // shows the wasm build was used.
 //
 //   1) vendor npm:  rm -rf /tmp/vv-vendor && mkdir -p /tmp/vv-vendor \
-//        && (cd /tmp/vv-vendor && npm install npm@12.2.1 --no-save --no-audit --no-fund)
+//        && (cd /tmp/vv-vendor && npm install npm@10.9.2 --no-save --no-audit --no-fund)
 //   2) run (Node 22+):  node scripts/spike-next.mjs
 
 import { Kernel } from "../packages/kernel-host/kernel.js";
@@ -28,7 +28,7 @@ const VENDOR_NPM = process.argv[2] || "/tmp/vv-vendor/node_modules/npm";
 const VFS_NPM = "/usr/lib/node_modules/npm";
 if (!fs.existsSync(path.join(VENDOR_NPM, "bin/npm-cli.js"))) {
   console.error(`No vendored npm at ${VENDOR_NPM} (expected bin/npm-cli.js).`);
-  console.error(`Vendor it:  rm -rf /tmp/vv-vendor && mkdir -p /tmp/vv-vendor && (cd /tmp/vv-vendor && npm install npm@12.2.1 --no-save --no-audit --no-fund)`);
+  console.error(`Vendor it:  rm -rf /tmp/vv-vendor && mkdir -p /tmp/vv-vendor && (cd /tmp/vv-vendor && npm install npm@10.9.2 --no-save --no-audit --no-fund)`);
   process.exit(2);
 }
 

@@ -10,7 +10,7 @@
 //
 //   1) vendor npm:  (already done by the agent)
 //        rm -rf /tmp/vv-vendor && mkdir -p /tmp/vv-vendor \
-//          && (cd /tmp/vv-vendor && npm install npm@12.2.1 --no-save --no-audit --no-fund)
+//          && (cd /tmp/vv-vendor && npm install npm@10.9.2 --no-save --no-audit --no-fund)
 //   2) run:  node scripts/spike-npm.mjs [path-to-vendored-npm]
 
 import { Kernel } from "../packages/kernel-host/kernel.js";
@@ -26,7 +26,7 @@ const VFS_NPM = "/usr/lib/node_modules/npm";
 
 if (!fs.existsSync(path.join(VENDOR_NPM, "bin/npm-cli.js"))) {
   console.error(`No vendored npm at ${VENDOR_NPM} (expected bin/npm-cli.js).`);
-  console.error(`Vendor it first:  rm -rf /tmp/vv-vendor && mkdir -p /tmp/vv-vendor && (cd /tmp/vv-vendor && npm install npm@12.2.1 --no-save --no-audit --no-fund)`);
+  console.error(`Vendor it first:  rm -rf /tmp/vv-vendor && mkdir -p /tmp/vv-vendor && (cd /tmp/vv-vendor && npm install npm@10.9.2 --no-save --no-audit --no-fund)`);
   process.exit(2);
 }
 
@@ -202,7 +202,7 @@ console.log(`exit=${v.code}  (${Date.now() - t1}ms)`);
 console.log("stdout:", JSON.stringify(v.stdout));
 if (v.stderr && v.stderr.trim()) console.log("stderr:\n" + v.stderr);
 
-const versionOk = v.code === 0 && /^\s*12\.2\.1\s*$/.test(v.stdout || "");
+const versionOk = v.code === 0 && /^\s*10\.9\.2\s*$/.test(v.stdout || "");
 console.log("version gate: " + (versionOk ? "PASS" : "FAIL"));
 
 // ── https shim self-test (isolate the shim from npm's plumbing) ──────────────
