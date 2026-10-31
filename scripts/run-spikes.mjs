@@ -209,6 +209,10 @@ const SPIKES = [
   // ESM→CJS loader guarantees: top-level-await async retry + circular re-export
   // live bindings (SvelteKit config / astro runtime). Pure parser, no kernel/wasm.
   { name: "esm", file: "spike-esm.mjs", net: false, timeout: 60000 },
+  // Module resolver: a missing main/exports.require target falls back to the build
+  // that exists (nitro's pruned ESM-only deps). createModuleSystem over host fs, no
+  // kernel/wasm.
+  { name: "resolve-fallback", file: "spike-resolve-fallback.mjs", net: false, timeout: 60000 },
   // Breakpoint debugger: the source instrumenter + in-guest CDP Debugger backend +
   // the debug-command SharedArrayBuffer channel (real Atomics across a worker).
   // Pure JS + vendored acorn, no kernel/wasm.
