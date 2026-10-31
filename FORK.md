@@ -14,6 +14,14 @@ upstream as small PRs, everything else is justified and recorded here.
   - `BootOptions.deferCacheFiles` (`7725413`)
   - pnpm config moved out of the base process environment (`c20e0e9`) — it matters only
     with the vendored npm 12 pin, which upstream does not carry.
+  - hostful `file:` URL recovery in `fileURLToPath` / `Bun.fileURLToPath` / `Bun.file(URL)`
+    (`packages/runtime/node/internal/url.js`, `builtins/bun.js`, `builtins/bun-file.js`) — the
+    one deliberate deviation from Node, which throws on posix. Chromium's `file:` parser is
+    platform-dependent (`url/url_parse_file.cc` has a WIN32 UNC branch), so
+    `"file:" + "/home/user/x"` is `file://home/user/x` on Chrome/Windows; in this VFS a host
+    can only be the first path segment that parser promoted, so it is put back.
+- **No downstream-specific code in this repository.** Product templates, assets, probes or
+  branding belong to the downstream product, which pins this fork as a submodule.
 - **Scope: the whole project except `packages/studio`.** The Studio IDE app is the downstream
   product's business: it keeps its own fork of it (`ide/` in `facilis-dev/facilis`) and its
   own copy of the preview Service Worker (`ide/public/sw.js`). One coupling to know —
@@ -24,8 +32,6 @@ upstream as small PRs, everything else is justified and recorded here.
   its files.** A finding that belongs to the IDE is reported there (diagnosis, repro, design,
   patch in the body) and implemented there; this working tree, the downstream's working tree
   and the submodule worktree are all left alone.
-- **No downstream-specific code in this repository.** Product templates, assets, probes or
-  branding belong to the downstream product, which pins this fork as a submodule.
 - Fork-only commits keep changesets while they touch `@vivari/core`.
 
 ## Upstream work
@@ -38,6 +44,10 @@ upstream as small PRs, everything else is justified and recorded here.
   path become a file URL host` (`9184ee5` + `36c9714`, branch `fix/file-url-host`). Fixes the
   fork's issue #1 (`import.meta.url` gaining a bogus host).
 - All three are rebased on the `v1.2.0` tag (`9c87dec`).
+- Not opened yet: the hostful-`file:` recovery above. It belongs in the re-opened
+  `fix/file-url-host-v2` PR the maintainer asked for after reverting #31, whose
+  `fileURLToPath` hunk currently promises Node's throw — the PR and this decision have to land
+  together (the alternative is an upstream issue first, per policy).
 - `1fc1094` cannot go upstream alone: it fixes `hydrate()`, which only exists after
   `8fd62fe`.
 - `c8ae8ed` (npm 12.2.1) is a chore coupled to `c20e0e9`; the bump was completed in

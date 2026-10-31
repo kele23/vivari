@@ -737,9 +737,14 @@ console.log("== Bun.pathToFileURL / Bun.fileURLToPath build absolute file URLs =
   ok(Bun.pathToFileURL("/home/user/x y.js").href === "file:///home/user/x%20y.js", "an absolute path is percent-encoded");
   ok(Bun.fileURLToPath("file:///home/user/projects/app/src/index.ts") === "/home/user/projects/app/src/index.ts", "fileURLToPath converts a three-slash file URL");
   ok(Bun.fileURLToPath(rel) === "/home/user/projects/app/src/index.ts", "…and accepts the URL object pathToFileURL returned");
-  let hostCode = null;
-  try { Bun.fileURLToPath("file://home/user/x"); } catch (e) { hostCode = e.code; }
-  ok(hostCode === "ERR_INVALID_FILE_URL_HOST", "a hostful file URL throws instead of dropping the host (" + hostCode + ")");
+  // A host can only be the first path segment a browser's `file:` parser promoted:
+  // `"file:" + __filename` is `file://home/…` on Chrome/Windows (see node/internal/url.js
+  // and spike-esm section 9). Both Bun entry points rebuild the path it meant. The strip
+  // that used to live in bun-file.js returned "home/user/x" — a RELATIVE path — so
+  // `Bun.file(url)` read under the cwd instead of the file the URL named.
+  ok(Bun.fileURLToPath("file://home/user/x") === "/home/user/x", "a hostful file URL is rebuilt into the path it meant");
+  ok(Bun.fileURLToPath("file://home") === "/home", "…and a single-segment path keeps no authority slash");
+  ok(Bun.file(new URL("file://home/user/x.js")).name === "/home/user/x.js", "Bun.file(URL) goes through the same rule");
 }
 
 // A Bun global with no kernel, for the pure-function checks below.

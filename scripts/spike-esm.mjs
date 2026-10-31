@@ -359,26 +359,60 @@ console.log("\n== [esm] relative module id must not become import.meta.url's hos
   );
 }
 
-// ── 9. fileURLToPath refuses a hostful file URL ───────────────────────────────
-// The lenient shim was the other half: it turned the malformed URL into a
-// plausible-looking /user/… path instead of failing. Real Node throws
-// ERR_INVALID_FILE_URL_HOST on posix; match it so this class fails at the URL.
-console.log("\n== [url] fileURLToPath rejects a host instead of silently dropping it ==");
+// ── 9. fileURLToPath recovers the path from a hostful file URL ───────────────
+// `"file:" + absolutePath` is how userland builds a file URL from `__filename`, and
+// PGlite's CJS build does exactly that. Chrome does not parse the result the same way
+// on every platform: url/url_parse_file.cc takes its WIN32 branch for anything that is
+// not `C:\` and is not exactly three slashes, and reads the rest as an UNC path — so
+// `file:/home/user/x` is `file://home/user/x` on Chrome/Windows, and
+// `file:///home/user/x` in Node and on Chrome/Linux (url_parse_unittest.cc pins both
+// tables). This VFS has no file hosts, so the segment the parser promoted is put back
+// in front of the pathname instead of throwing (which killed the database boot) or
+// dropping it (the old /user/… bug).
+//
+// The Windows branch is MODELLED here: the parser under test is the host's, and what
+// is checked is the reconstruction. Two slashes reproduce that parse on any host
+// (`file://home/user/x` is UNC everywhere), which is why this runs in CI.
+console.log("\n== [url] fileURLToPath recovers the path from a hostful file URL ==");
 {
   const mod = { exports: {} };
   urlFactory(mod.exports, () => { throw new Error("require is not available here"); }, mod, {}, {}, {});
   const { fileURLToPath } = mod.exports;
-  let code = null;
-  try {
-    fileURLToPath("file://home/user/projects/x");
-  } catch (e) {
-    code = e.code;
+  // What Chrome/Windows makes of `"file:" + "/a/rest"`: host "a", pathname "/rest".
+  const asChromeOnWindows = (absPath) => new URL("file://" + String(absPath).replace(/^\/+/, ""));
+  check(
+    "the Chrome/Windows parse promotes the first path segment to the host",
+    asChromeOnWindows("/home/user/x").hostname === "home",
+  );
+  for (const p of [
+    "/home/user/projects/app/x.js",
+    "/home/user/projects/app/node_modules/@electric-sql/pglite/dist/index.cjs",
+    "/home/user/projects/my project/x.js",
+    "/home/user/progetti/città/x.js",
+    "/home/user/projects/app/",
+    "/home",
+  ]) {
+    check(`a hostful URL comes back as ${p}`, fileURLToPath(asChromeOnWindows(p)) === p);
   }
-  check("a hostful file URL throws ERR_INVALID_FILE_URL_HOST", code === "ERR_INVALID_FILE_URL_HOST");
+  check(
+    "the string form recovers too",
+    fileURLToPath("file://home/user/projects/x") === "/home/user/projects/x",
+  );
   check(
     "a three-slash file URL still converts",
     fileURLToPath("file:///home/user/projects/x") === "/home/user/projects/x",
   );
+  check(
+    "localhost keeps its normal meaning",
+    fileURLToPath("file://localhost/home/x") === "/home/x",
+  );
+  let scheme = null;
+  try {
+    fileURLToPath("https://example.com/x");
+  } catch (e) {
+    scheme = e.code;
+  }
+  check("a non-file scheme still throws", scheme === "ERR_INVALID_URL_SCHEME");
 }
 
 console.log(`\nRESULT: ${failures === 0 ? "PASS — esm.js live-binding + TLA loader guarantees hold" : `FAIL — ${failures} check(s) failed`}`);
