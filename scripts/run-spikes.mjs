@@ -638,7 +638,7 @@ async function ensureVendoredNpm() {
   console.log("\n== provisioning vendored npm at " + VENDOR_DIR + " ==");
   fs.rmSync(VENDOR_DIR, { recursive: true, force: true });
   fs.mkdirSync(VENDOR_DIR, { recursive: true });
-  const r = await spawnInherit("npm", ["install", "npm@10.9.2", "--no-save", "--no-audit", "--no-fund"], VENDOR_DIR);
+  const r = await spawnInherit("npm", ["install", "npm@12.2.1", "--no-save", "--no-audit", "--no-fund"], VENDOR_DIR);
   return r === 0 && fs.existsSync(path.join(VENDOR_NPM, "bin/npm-cli.js"));
 }
 

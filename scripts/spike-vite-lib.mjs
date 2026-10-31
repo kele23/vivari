@@ -15,7 +15,7 @@
 //
 // Usage (Node 22+, needs network for npm):
 //   1) vendor npm:  rm -rf /tmp/vv-vendor && mkdir -p /tmp/vv-vendor \
-//        && (cd /tmp/vv-vendor && npm install npm@10.9.2 --no-save --no-audit --no-fund)
+//        && (cd /tmp/vv-vendor && npm install npm@12.2.1 --no-save --no-audit --no-fund)
 //   2) a per-framework spike calls runViteSpike({...}); run e.g.
 //        node scripts/spike-preact.mjs
 //
@@ -99,7 +99,7 @@ export async function runViteSpike({ name, dir, templateId, files, entryModule, 
   if (!fs.existsSync(path.join(VENDOR_NPM, "bin/npm-cli.js"))) {
     console.error(`No vendored npm at ${VENDOR_NPM} (expected bin/npm-cli.js).`);
     console.error(
-      `Vendor it:  rm -rf /tmp/vv-vendor && mkdir -p /tmp/vv-vendor && (cd /tmp/vv-vendor && npm install npm@10.9.2 --no-save --no-audit --no-fund)`,
+      `Vendor it:  rm -rf /tmp/vv-vendor && mkdir -p /tmp/vv-vendor && (cd /tmp/vv-vendor && npm install npm@12.2.1 --no-save --no-audit --no-fund)`,
     );
     process.exit(2);
   }

@@ -42,7 +42,7 @@
 //   7) both asset shapes serve: one under base, one root-absolute Vite dev URL.
 //
 //   1) vendor npm:  rm -rf /tmp/vv-vendor && mkdir -p /tmp/vv-vendor \
-//        && (cd /tmp/vv-vendor && npm install npm@10.9.2 --no-save --no-audit --no-fund)
+//        && (cd /tmp/vv-vendor && npm install npm@12.2.1 --no-save --no-audit --no-fund)
 //   2) run (Node 22+):  node scripts/spike-starlight.mjs
 //      env: VV_LIVE=1 (stream), VV_INSTALL_ONLY=1, VV_BASE=/preview/4321/, VV_PORT.
 process.env.VV_BIND_TIMEOUT ||= "300000"; // Astro's first Vite build + wasm boot is slow in-VM.
