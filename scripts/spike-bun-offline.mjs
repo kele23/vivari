@@ -1856,18 +1856,49 @@ console.log("== import.meta: the Node members are unconditional, Bun's are gated
   // The loader's own prelude used to hand back the path, so code that does
   // fileURLToPath(import.meta.resolve(…)) — Nitro's node-worker/node-process runners,
   // among others — threw "Invalid URL" on a perfectly resolvable module.
-  const urlRequire = () => ({});
-  urlRequire.resolve = (s) =>
-    s === "fs" || s === "fs/promises"
-      ? s
-      : s === "./sibling.ts"
-        ? "/app/src/sibling.ts"
-        : "/app/node_modules/pkg/index.js";
+  // The prelude asks require('module').builtinModules which ids are Node's, so the
+  // stub hands back the real list.
+  const urlRequire = (id) => (id === "module" ? { builtinModules: nodeRequire("node:module").builtinModules } : {});
+  const resolved = {
+    "./sibling.ts": "/app/src/sibling.ts",
+    "@scope/pkg": "/app/node_modules/@scope/pkg/index.js",
+    // require.resolve hands builtins and Bun's modules back as their own ids.
+    fs: "fs",
+    "fs/promises": "fs/promises",
+    "node:fs": "node:fs",
+    bun: "bun",
+    "bun:sqlite": "bun:sqlite",
+  };
+  urlRequire.resolve = (s) => resolved[s] ?? "/app/node_modules/pkg/index.js";
   const urlMeta = evalMeta(src, urlRequire, entry);
   ok(urlMeta.resolve("./sibling.ts") === "file:///app/src/sibling.ts", "import.meta.resolve returns a file: URL for a relative specifier");
   ok(urlMeta.resolve("pkg") === "file:///app/node_modules/pkg/index.js", "…and for a bare package specifier");
   ok(urlMeta.resolve("fs") === "node:fs", "…and node: for a core builtin");
   ok(urlMeta.resolve("fs/promises") === "node:fs/promises", "…including a builtin subpath");
+  ok(urlMeta.resolve("node:fs") === "node:fs", "…and an already-prefixed builtin is not prefixed twice");
+  // Real bun 1.3.14 returns both of these unchanged. The first version of this
+  // prefixed anything that was not a path, giving `node:bun:sqlite` and `node:bun`.
+  ok(urlMeta.resolve("bun:sqlite") === "bun:sqlite", `a bun: module keeps its own scheme (${urlMeta.resolve("bun:sqlite")})`);
+  ok(urlMeta.resolve("bun") === "bun", `bare 'bun' is not a Node builtin, so no node: prefix (${urlMeta.resolve("bun")})`);
+  ok(
+    urlMeta.resolve("@scope/pkg") === "file:///app/node_modules/@scope/pkg/index.js",
+    `a scoped package keeps its literal '@', like pathToFileURL (${urlMeta.resolve("@scope/pkg")})`,
+  );
+  // Escaping is checked against the host's own pathToFileURL (measured identical on
+  // 22.16 and 24.21 for every path below).
+  const { pathToFileURL, fileURLToPath } = nodeRequire("node:url");
+  for (const p of [
+    "/app/node_modules/@scope/pkg/x y.js",
+    "/app/a#b?c%d.js",
+    "/app/!$&'()*+,;=:@.js",
+    "/app/~[]|^{}`\"<>\\.js",
+    "/app/ü/日本/😀.js",
+  ]) {
+    urlRequire.resolve = () => p;
+    const u = evalMeta(src, urlRequire, entry).resolve("x");
+    ok(u === pathToFileURL(p).href, `file: URL matches pathToFileURL for ${JSON.stringify(p)} (${u})`);
+    ok(fileURLToPath(u) === p, `…and fileURLToPath round-trips it`);
+  }
   // The gate, stated as a behaviour: `import.meta.env` must NOT exist under node.
   // Vite SSR code reads `import.meta.env.MODE`; today that throws a TypeError it
   // can act on, and an always-on alias of process.env would make it read

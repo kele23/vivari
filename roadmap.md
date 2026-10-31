@@ -4436,7 +4436,8 @@ Divergences worth stating plainly. `bun test` under this shim runs the test *fil
 `bun:test` runner rather than Bun's, so "test mode" here means the environment semantics above and
 not Bun's runner internals. `import.meta.resolve` still returns a path where Bun (and Node) return
 a `file://` URL — pre-existing, unchanged by this batch, and called out here so it is not
-rediscovered as new. And `--env-file` / `--no-env-file` / `bunfig.toml`'s `env = false` are not
+rediscovered as new. (Fixed later, see "`import.meta.resolve` returns a URL" at the end of this
+file.) And `--env-file` / `--no-env-file` / `bunfig.toml`'s `env = false` are not
 wired up: the automatic set is all there is today.
 
 The offline tier goes from 463 checks to **557**, and it earns them: the `import.meta` prelude is
@@ -10608,7 +10609,8 @@ Not proved here, and listed rather than dressed up:
   `fileURLToPath(import.meta.resolve('decorator-transforms/runtime-esm'))` and threw
   "Invalid URL". Worked around in the template with a bare specifier rather than fixed in the
   runtime, because the fix is a second behaviour change to a shared path and this change
-  already carries one. It is a real gap and it will be hit again.
+  already carries one. It is a real gap and it will be hit again. (It was, by Nitro's dev
+  runners, and is fixed now: see "`import.meta.resolve` returns a URL" at the end of this file.)
 - **The dynamic-import path still reads `__esModule` the old way.** `__oc_def` now requires
   the `default` key to exist; `__oc_ns` (`esm.js:155`), `rewriteCjsDynamicImport`
   (`esm.js:449`) and `__ocImport` (`index.js:1752`) still treat the flag as proof of an ESM
@@ -11709,3 +11711,25 @@ listener by itself.
   started, so the signal waits in its queue. Same as before; `unref()` or `close()`.
 - A port the guest reaches some other way than the ones listed is not the guest's and
   keeps browser semantics — an early exit, not a hang.
+
+## `import.meta.resolve` returns a URL (PR #20 + follow-up)
+
+Node's `import.meta.resolve()` returns a URL string. Ours returned the path `require.resolve()`
+gives, so `fileURLToPath(import.meta.resolve(x))` threw "Invalid URL" on a module that had
+resolved fine. Nitro's `node-worker`/`node-process` dev runners do exactly that, and the Ember
+template had already worked around it (see the Ember entry above).
+
+PR #20 (kele23) made it return `file://…` for paths and `node:…` for builtins. The follow-up
+tightened two things, both checked against real Node and real bun 1.3.14:
+
+- Only Node's public core ids (`require('module').builtinModules`) get `node:`. The first
+  version prefixed anything that was not a path, so `bun:sqlite` became `node:bun:sqlite` and a
+  Bun guest's bare `bun` became `node:bun`. Real bun returns both unchanged.
+- Path segments are escaped the way `pathToFileURL` does. `encodeURIComponent` alone turned
+  `/node_modules/@scope/` into `/%40scope/`, which `fileURLToPath` still reads but string
+  comparisons do not, and it left `~` literal where Node writes `%7E`.
+
+Gate: the `import.meta` block of `spike-bun-offline.mjs` compares the file URL with the host's
+`pathToFileURL` for paths with spaces, `#?%`, sub-delims, `~[]|^{}` and non-ASCII (identical on
+Node 22.16 and 24.21), and checks the `bun:`/`bun` cases. With the PR #20 version of `esm.js`,
+6 of those checks fail.

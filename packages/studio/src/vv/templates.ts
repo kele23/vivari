@@ -10656,10 +10656,11 @@ export default defineConfig({
 `,
     // No @embroider/compat/babel here (babelCompatSupport / templateCompatSupport),
     // which is what `ember new` emits — those transforms exist for v1 addons, and
-    // this app has none. The decorator runtime is a BARE specifier on purpose:
-    // the blueprint writes fileURLToPath(import.meta.resolve(…)), and in-VM
-    // import.meta.resolve returns a path rather than the file:// URL Node returns,
-    // so fileURLToPath throws "Invalid URL" and the config never loads.
+    // this app has none. The decorator runtime is a BARE specifier, where the
+    // blueprint writes fileURLToPath(import.meta.resolve(…)). That was a workaround:
+    // in-VM import.meta.resolve used to return a path, so fileURLToPath threw
+    // "Invalid URL". It returns a file:// URL like Node now, so the blueprint form
+    // would also work; the bare specifier stays because it is what has been tested.
     //
     // NO targetFormat here, and that is the whole point of this line. The default is
     // 'wire', which compiles each <template> down to a createTemplateFactory(...) call.
