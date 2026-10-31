@@ -116,13 +116,16 @@ export function importMetaSource(fileUrl, filename) {
       // Path segments keep `@`, `:` and the sub-delims literal like pathToFileURL does,
       // so a scoped package reads `/@scope/` rather than `/%40scope/`. `~` is the one
       // character encodeURIComponent leaves alone that pathToFileURL encodes.
+      // The builtin list comes from process.binding('natives') (the same list as
+      // builtinModules) and NOT from require('module'): this prelude is in every ESM
+      // module, and Bun.build reads a literal require in it as a real dependency.
       ",resolve:function(s){if(!__oc_require.resolve)return s;" +
         "var r=__oc_require.resolve(s);if(typeof r!=='string')return r;" +
         "if(r.charAt(0)==='/')return 'file://'+r.split('/').map(function(c){" +
           "return encodeURIComponent(c).replace(/%(40|3A|24|26|2B|2C|3B|3D)/g,decodeURIComponent).replace(/~/g,'%7E');}).join('/');" +
         "if(/^[a-zA-Z][a-zA-Z0-9+.-]*:/.test(r))return r;" +
-        "var b=__oc_require('module').builtinModules;" +
-        "return b&&b.indexOf(r)>=0?'node:'+r:r;}};" +
+        "var n=typeof process!=='undefined'&&process.binding?process.binding('natives'):null;" +
+        "return n&&Object.prototype.hasOwnProperty.call(n,r)?'node:'+r:r;}};" +
     "if(globalThis.Bun){" +
       // path/dir/file are Bun's names for filename/dirname/basename. `.file` is
       // the basename WITH its extension ("index.tsx"), per Bun's docs.
