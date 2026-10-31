@@ -4,6 +4,12 @@ From 1.1.0 on, entries are generated from [changesets](https://github.com/change
 `@vivari/core` and `@vivari/react` are released together under the same version, so a release
 that says "No changes in this release" changed only `@vivari/core`.
 
+## 1.2.0
+
+### Minor Changes
+
+- [`890c5f0`](https://github.com/maitrungduc1410/vivari/commit/890c5f00a97a507b2464a8ce98463a72dd095b63) Thanks [@maitrungduc1410](https://github.com/maitrungduc1410)! - `node:sqlite` is available in guest processes (`DatabaseSync`, `StatementSync`), on the same wasm SQLite as `bun:sqlite`, and matches real Node's behaviour case by case. SQLite file locks are now real across processes and threads, so several processes can write one database without losing rows; `bun:sqlite` gets this too. `crypto.getCurves()` exists and returns an empty list until ECDH is supported.
+
 ## 1.1.5
 
 No changes in this release.
