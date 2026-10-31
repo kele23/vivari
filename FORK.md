@@ -10,9 +10,9 @@ upstream as small PRs, everything else is justified and recorded here.
 - **Upstream PRs: simple, self-contained fixes only.** Features that change the public SDK
   surface are discussed in an upstream issue first, and stay fork-only until then.
 - **Fork-only, by decision:**
-  - `BootOptions.deferRestoreRoots` / `vv-restore-roots` (`54d4dfa`)
-  - `BootOptions.deferCacheFiles` (`50888b8`)
-  - pnpm config moved out of the base process environment (`a3caed5`) — it matters only
+  - `BootOptions.deferRestoreRoots` / `vv-restore-roots` (`8fd62fe`)
+  - `BootOptions.deferCacheFiles` (`7725413`)
+  - pnpm config moved out of the base process environment (`c20e0e9`) — it matters only
     with the vendored npm 12 pin, which upstream does not carry.
 - **No downstream-specific code in this repository.** Product templates, assets, probes or
   branding belong to the downstream product, which pins this fork as a submodule.
@@ -21,14 +21,14 @@ upstream as small PRs, everything else is justified and recorded here.
 ## Upstream work
 
 - [#29](https://github.com/maitrungduc1410/vivari/pull/29) — `fix(runtime): skip comments
-  between export and its declaration` (`8be8a96`, branch `fix/esm-comment-after-export`).
+  between export and its declaration` (`c9a9ecc`, branch `fix/esm-comment-after-export`).
 - [#30](https://github.com/maitrungduc1410/vivari/pull/30) — `fix(vendor): rebuild a pack whose
-  stamped version no longer matches` (`b7eb616`, branch `fix/vendor-stale-pack-version`).
-- Both branch from upstream `master` at `890c5f0` (the v1.2.0 line).
-- `8754dd5` cannot go upstream alone: it fixes `hydrate()`, which only exists after
-  `54d4dfa`.
-- `a34c205` (npm 12.2.1) is a chore coupled to `a3caed5`; the bump was completed in
-  `50a5c8f` (version gates, vendor provisioning and current-state docs now match the pin).
+  stamped version no longer matches` (`7483504`, branch `fix/vendor-stale-pack-version`).
+- Both are rebased on the `v1.2.0` tag (`9c87dec`).
+- `1fc1094` cannot go upstream alone: it fixes `hydrate()`, which only exists after
+  `8fd62fe`.
+- `c8ae8ed` (npm 12.2.1) is a chore coupled to `c20e0e9`; the bump was completed in
+  `9aa7682` (version gates, vendor provisioning and current-state docs now match the pin).
 
 ## Removed fork-only work
 
@@ -51,7 +51,6 @@ git rebase upstream/master      # fork-only commits stay on top
 npm run spikes:offline          # after npm install; Wasm spikes need npm run build
 ```
 
-Upstream moved to `890c5f0` on 2026-10-31 (release/v1.2.0 created), so `facilis/main` is
-behind until the next realignment. When rebasing, drop `8be8a96`/`b7eb616` if their PRs
-merged, and keep `e2f4246` out of the replay (its revert commit becomes empty and is dropped
-too).
+Realigned onto the `v1.2.0` tag (`9c87dec`) on 2026-10-31: the fork-only commits are
+replayed on top, `e2f4246` stays out, and its revert commit is gone with it. When a PR
+merges upstream, drop its commit from the replay.
