@@ -26,6 +26,24 @@ event loop, native Wasm), read **[`ARCHITECTURE.md`](./ARCHITECTURE.md)**.
 
 ---
 
+## Fork policy (this repository)
+
+This checkout is `kele23/vivari`, a fork of upstream; the full record is
+[`FORK.md`](./FORK.md). The rules that change what an agent does here:
+
+- **Scope: everything except `packages/studio`.** The Studio IDE app is the downstream
+  product's business — it keeps its own fork of it (`ide/` in `facilis-dev/facilis`) and its
+  own copy of the preview Service Worker (`ide/public/sw.js`). One coupling to know:
+  `@vivari/core` vendors `packages/studio/public/sw.js` into `dist/assets/sw.js` at build
+  time, so the preview SW ships with core even though its canonical copy lives in studio. A
+  preview-SW fix is therefore IDE-side by decision, not by architecture.
+- **Signalling the downstream means a GitHub issue in `facilis-dev/facilis`, never an edit to
+  its files.** Report the finding there (diagnosis, repro, design, patch in the body) and
+  leave that repository's working tree alone; downstream-specific code does not belong here
+  either.
+- **Upstream PRs: simple, self-contained fixes only**, and anything that changes the public SDK
+  surface is discussed in an upstream issue first and stays fork-only until then.
+
 ## Folder structure
 
 ```
