@@ -11733,3 +11733,21 @@ Gate: the `import.meta` block of `spike-bun-offline.mjs` compares the file URL w
 `pathToFileURL` for paths with spaces, `#?%`, sub-delims, `~[]|^{}` and non-ASCII (identical on
 Node 22.16 and 24.21), and checks the `bun:`/`bun` cases. With the PR #20 version of `esm.js`,
 6 of those checks fail.
+
+## The OPFS mirror drains project writes before package-manager caches (PR #21 + follow-up)
+
+kele23 measured it in a browser: during a cold `pnpm install` the mirror's queue held 8,000 to
+12,000 paths, nearly all pnpm store and metadata files, draining at about 500 a second. A file
+the user saved during the install waited behind all of them, and `manifest.json` was only
+rewritten when the queue emptied, so it froze about 20 s after boot at 514 entries while `meta`
+grew past 3,000. A probe file written after the install did not survive a reload.
+
+PR #21 added a low-priority queue for the caches (`isLowPriority`, fed by `PM_CACHE_PREFIXES`
+in `fs-worker.ts`), rewrites the index during a long drain instead of only at the end, and made
+`flush()` land the project paths and the index without waiting for the caches.
+
+The follow-up checked the one thing that change could break: whether any caller of `flush()`
+needed the caches on disk too. There is one production caller, `pagehide`, and it is exactly
+the case that must not wait. It also checked `PM_CACHE_PREFIXES` against the cache env the
+shell sets (npm, yarn, pnpm store, corepack); they match. The rules are in AGENTS.md under
+"OPFS persistence".

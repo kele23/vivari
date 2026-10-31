@@ -4714,6 +4714,29 @@ The VFS mirrors to OPFS and **survives reload**. If a demo behaves as if old fil
 linger, that's why — use `?reset` on the demo URL to wipe it. Restore happens
 before any syscall is served.
 
+**Project writes drain before package-manager caches, and the index does not wait for an
+empty queue.** A cold `pnpm install` enqueues 8,000 to 12,000 cache files while the mirror
+drains about 500 a second. With one FIFO queue, a file the user saved during the install sat
+behind all of them, and `manifest.json` was only rewritten when the queue emptied, which it
+never did. A reload then restored an index minutes old (measured: 514 entries against more
+than 3,000 in `meta`) and the user's edit was gone. So `opfs-persistence.js` keeps a second
+queue for paths `isLowPriority` marks (`PM_CACHE_PREFIXES` in `fs-worker.ts`), drains it only
+when the project queue is empty, and rewrites the index on its usual 1 s debounce while the
+queue is still busy. Rules if you touch it:
+
+- **`flush()` promises project paths and the index, not the caches.** Its only caller is
+  `pagehide` (`bridge.ts` → `fs-flush`), where a tab cannot wait for a cold install. Cache
+  files left in the queue are just not persisted this session, which costs a re-download, not
+  a broken tree, because a path only enters the index after its bytes are written. If you add
+  a caller that needs everything on disk (an export, a "sync now"), it needs a different call.
+- **Keep `PM_CACHE_PREFIXES` in step with the cache env** in `kernel-worker.ts`
+  (`npm_config_cache`, `YARN_CACHE_FOLDER`, `npm_config_store_dir`, `COREPACK_HOME`). A cache
+  moved to a path the list does not cover still persists, but back at project priority, and
+  the stale-index bug returns without any error.
+- Caches still drain whenever the project queue is empty, so their durability is unchanged.
+  `spike-opfs-delete-recreate.mjs` gates the ordering: 200 queued cache writes plus one project
+  write, `flush()`, and the project file must restore while the last cache file must not.
+
 ### VFS memory: whole-file lazy compression (on by default)
 The FS worker's Wasm linear memory (all file bodies) is the largest addressable term
 in the tab. File bodies are a `FileBody { Raw | Zip{data,len} }`: cold files are stored
