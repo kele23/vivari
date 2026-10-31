@@ -77,6 +77,16 @@ export async function createOpfsPersistence({
   const MANIFEST_MIN_INTERVAL_MS = 1000;
   let lastManifestWrite = 0;
   let manifestTimer = null;
+  // The mirror is per ORIGIN, not per tab: a second Studio tab restores the same tree
+  // and mirrors its own writes into the same OPFS directory. The index used to be
+  // rewritten as a whole from THIS kernel's `meta`, so a tab that had never seen
+  // another tab's paths silently dropped them — measured with two tabs: after tab A
+  // wrote one file, tab B's whole project disappeared from the index and was gone on
+  // the next reload. So track what this kernel changed and merge exactly that into
+  // whatever the index holds on disk, under a Web Lock so two tabs cannot interleave
+  // the read-modify-write.
+  const owned = new Map(); // path -> "w" (write/create) | "d" (delete)
+  const MANIFEST_LOCK = "vv-vfs-manifest";
 
   const parts = (p) => p.split("/").filter(Boolean);
 
@@ -126,18 +136,126 @@ export async function createOpfsPersistence({
       /* already gone / never written */
     }
   }
-  async function writeManifest() {
-    const arr = [...meta.entries()];
-    const fh = await base.getFileHandle(MANIFEST, { create: true });
+  // OPFS has no atomic replace: `truncate(0)` + `write()` leaves the file EMPTY for the
+  // few milliseconds in between. A tab that boots during that window read an empty index,
+  // failed to parse it and restored NOTHING — measured with two tabs: after a reload every
+  // project was gone while the index itself was intact. So writers stage a complete copy
+  // and then replace the live file, and readers fall back to the staged copy and retry
+  // instead of treating "mid-write" as "nothing saved".
+  const MANIFEST_STAGE = MANIFEST + ".new";
+  const READ_RETRIES = 6;
+  const READ_RETRY_MS = 100;
+  let manifestUnreadable = false; // logged once; suppresses overwriting a bad index
+
+  async function readJsonFile(name) {
+    const fh = await base.getFileHandle(name); // throws NotFoundError when absent
     const ah = await fh.createSyncAccessHandle();
     try {
-      const bytes = enc.encode(JSON.stringify(arr));
+      const size = ah.getSize();
+      const buf = new Uint8Array(size);
+      if (size) ah.read(buf, { at: 0 });
+      return JSON.parse(dec.decode(buf));
+    } finally {
+      ah.close();
+    }
+  }
+
+  // -> { entries: Map | null, ok: boolean }. `ok:false` means an index EXISTS but could
+  // not be parsed: the caller must not replace it with its own (empty) view.
+  async function readManifest() {
+    let present = false;
+    for (let attempt = 0; attempt < READ_RETRIES; attempt++) {
+      for (const name of [MANIFEST, MANIFEST_STAGE]) {
+        let parsed;
+        try {
+          parsed = await readJsonFile(name);
+        } catch (err) {
+          if (err && err.name === "NotFoundError") continue; // absent: try the other copy
+          present = true; // exists but is being rewritten right now
+          continue;
+        }
+        if (Array.isArray(parsed)) return { entries: new Map(parsed), ok: true };
+        present = true;
+      }
+      if (!present) return { entries: null, ok: true }; // first boot on this origin
+      if (attempt < READ_RETRIES - 1) await new Promise((r) => setTimeout(r, READ_RETRY_MS));
+    }
+    return { entries: null, ok: false };
+  }
+
+  async function writeIndexFile(name, bytes) {
+    const fh = await base.getFileHandle(name, { create: true });
+    const ah = await fh.createSyncAccessHandle();
+    try {
       ah.truncate(0);
       ah.write(bytes, { at: 0 });
       ah.flush();
     } finally {
       ah.close();
     }
+  }
+
+  // Replace the live index. `move()` is atomic where the engine has it (Chrome's OPFS);
+  // without it a reader can still catch the copy mid-flight, which is survivable now that
+  // the staged copy exists and is complete.
+  async function replaceManifest(bytes) {
+    await writeIndexFile(MANIFEST_STAGE, bytes);
+    try {
+      const staged = await base.getFileHandle(MANIFEST_STAGE);
+      if (typeof staged.move === "function") {
+        await staged.move(MANIFEST);
+        return;
+      }
+    } catch {
+      /* fall through to the copy path */
+    }
+    try {
+      await writeIndexFile(MANIFEST, bytes);
+    } finally {
+      try {
+        await base.removeEntry(MANIFEST_STAGE);
+      } catch {
+        /* already gone */
+      }
+    }
+  }
+
+  async function writeManifest() {
+    const apply = async () => {
+      // Read-merge-write: apply only OUR changes, so paths another tab mirrored and
+      // this kernel never saw stay in the index. With no index at all (first boot) this
+      // kernel's `meta` is the best view there is.
+      const index = await readManifest();
+      // An index that exists but cannot be parsed must not be replaced by this tab's
+      // partial view: that turns a transient read race into real data loss. Keep the
+      // changes queued and let a later pass (or the next boot) try again.
+      if (!index.ok) {
+        if (!manifestUnreadable) {
+          manifestUnreadable = true;
+          console.warn(
+            "[opfs] the VFS index is unreadable; keeping it rather than overwriting it",
+          );
+        }
+        throw new Error("vv-vfs: manifest unreadable");
+      }
+      manifestUnreadable = false;
+      const onDisk = index.entries ?? new Map(meta);
+      for (const [path, op] of owned) {
+        if (op === "d") onDisk.delete(path);
+        else {
+          const e = meta.get(path);
+          if (e) onDisk.set(path, e);
+          else onDisk.delete(path); // vanished between enqueue and drain
+        }
+      }
+      await replaceManifest(enc.encode(JSON.stringify([...onDisk.entries()])));
+      owned.clear();
+    };
+    // navigator.locks serializes the read-modify-write across tabs. Where it is
+    // missing (older engine) the merge still runs, just without the interleave guard.
+    const locks = typeof navigator !== "undefined" ? navigator.locks : undefined;
+    if (locks && typeof locks.request === "function") await locks.request(MANIFEST_LOCK, apply);
+    else await apply();
   }
 
   // ---- the write-behind queue ----------------------------------------------
@@ -186,8 +304,13 @@ export async function createOpfsPersistence({
           if (op === "d" || op === "r") {
             await removePath(path);
             meta.delete(path);
+            owned.set(path, "d");
             const pre = path + "/";
-            for (const k of [...meta.keys()]) if (k.startsWith(pre)) meta.delete(k);
+            for (const k of [...meta.keys()])
+              if (k.startsWith(pre)) {
+                meta.delete(k);
+                owned.set(k, "d");
+              }
             manifestDirty = true;
           }
           if (op === "w" || op === "r") {
@@ -197,6 +320,7 @@ export async function createOpfsPersistence({
             else if (e.kind === "dir") await dirFor(path, true);
             // symlink: nothing on disk, manifest carries the target
             meta.set(path, { k: e.kind, m: e.mode | 0, t: e.target });
+            owned.set(path, "w");
             manifestDirty = true;
           }
         } catch {
@@ -273,24 +397,15 @@ export async function createOpfsPersistence({
   // = nothing persisted yet). Runs BEFORE the FS worker serves any syscall, and
   // calls the VFS directly (via `access`), so it never re-enters the queue.
   async function restore(onProgress) {
-    let arr;
-    try {
-      arr = JSON.parse(dec.decode(await (async () => {
-        const fh = await base.getFileHandle(MANIFEST);
-        const ah = await fh.createSyncAccessHandle();
-        try {
-          const size = ah.getSize();
-          const buf = new Uint8Array(size);
-          if (size) ah.read(buf, { at: 0 });
-          return buf;
-        } finally {
-          ah.close();
-        }
-      })()));
-    } catch {
-      return 0; // no manifest → first run
+    // Tolerant of a concurrent writer in another tab (see readManifest): a mid-write
+    // index is retried, never mistaken for "nothing saved".
+    const index = await readManifest();
+    if (!index.ok) {
+      console.warn("[opfs] the VFS index is unreadable; starting with an empty workspace");
+      return 0;
     }
-    if (!Array.isArray(arr) || arr.length === 0) return 0;
+    if (!index.entries || index.entries.size === 0) return 0; // first run on this origin
+    const arr = [...index.entries.entries()];
 
     // Drop anything `shouldPersist` now rejects. Older builds mirrored
     // node_modules file-by-file; replaying it here is the dominant cold-reopen
@@ -301,6 +416,10 @@ export async function createOpfsPersistence({
     const drop = [];
     for (const e of arr) (shouldPersist(e[0]) ? keep : drop).push(e);
     for (const [path, m] of keep) meta.set(path, m);
+    // Those paths are not persisted any more, so their index entries are dead weight
+    // everywhere — record the deletion so the merge below drops them from the shared
+    // index instead of leaving every other tab to rediscover them.
+    for (const [path] of drop) owned.set(path, "d");
 
     // Best-effort: reclaim OPFS space from legacy node_modules blobs that are no
     // longer referenced. Delete each distinct top-level node_modules subtree
