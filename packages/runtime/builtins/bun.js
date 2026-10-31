@@ -1566,38 +1566,13 @@ export function createBunRuntime({ process, Buffer, require, makeCwdRequire, res
     return new Uint8Array(zlib[name](toBuf(data, Buffer), opts || {}));
   };
 
-  // Bun's pathToFileURL resolves a relative path against cwd before building the
-  // URL, exactly as Node's does. "file://" + a relative path made its first segment
-  // the URL HOST ("file://home/…"), which fileURLToPath then turned into /user/… —
-  // the same silent wrong path as import.meta.url (see esm.js fileMetaPath). Build
-  // through URL#pathname so the pathname is percent-encoded like Node's, and keep a
-  // trailing separator (it is what keeps `new URL("./x", base)` inside the dir).
-  function pathToFileURL(p) {
-    const path = lazy("path");
-    const raw = String(p);
-    let resolved = path.resolve(typeof process.cwd === "function" ? process.cwd() : "/", raw);
-    if (raw.endsWith("/") && !resolved.endsWith("/")) resolved += "/";
-    const u = new URL("file:///");
-    u.pathname = resolved;
-    return u;
-  }
-  // Node/Bun reject a hostful file URL instead of returning a path with the host's
-  // leading segment silently missing.
   function fileURLToPath(url) {
-    const u = typeof url === "string" ? new URL(url) : url;
-    if (u.protocol !== "file:") {
-      const err = new TypeError("The URL must be of scheme file");
-      err.code = "ERR_INVALID_URL_SCHEME";
-      throw err;
-    }
-    if (u.hostname && u.hostname !== "localhost") {
-      const err = new TypeError('File URL host must be "localhost" or empty on posix');
-      err.code = "ERR_INVALID_FILE_URL_HOST";
-      throw err;
-    }
-    let p = decodeURIComponent(u.pathname);
+    const u = typeof url === "string" ? url : url.href;
+    let p = u.replace(/^file:\/\//, "");
+    try { p = decodeURIComponent(p); } catch {}
     return p || "/";
   }
+  function pathToFileURL(p) { return safeUrl("file://" + p); }
 
   // ---- the Bun global --------------------------------------------------------
   const formats = createBunFormats({ process });
