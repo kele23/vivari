@@ -17,6 +17,9 @@
 //     onRename). We can't await OPFS from the synchronous syscall path, so we
 //     only enqueue a dirty path and drain it on an async loop. Durability is
 //     therefore eventual (a few ms behind); flush() forces a drain (page hide).
+//   * Project paths and the index drain ahead of package-manager cache paths, and
+//     the manifest is rewritten while the queue is busy: a reload must never roll
+//     the index back to the last moment the queue happened to be empty.
 //   * On boot restore() replays a small manifest back into the VFS BEFORE the
 //     worker serves any syscall.
 //
@@ -38,7 +41,11 @@ const MANIFEST = "manifest.json";
 const enc = new TextEncoder();
 const dec = new TextDecoder();
 
-export async function createOpfsPersistence({ access, shouldPersist = () => true }) {
+export async function createOpfsPersistence({
+  access,
+  shouldPersist = () => true,
+  isLowPriority = () => false,
+}) {
   const origin = await navigator.storage.getDirectory();
   const base = await origin.getDirectoryHandle(ROOT_DIR, { create: true });
   const filesBase = await base.getDirectoryHandle(FILES_DIR, { create: true });
@@ -48,6 +55,14 @@ export async function createOpfsPersistence({ access, shouldPersist = () => true
   // path -> 'w' (write/create) | 'd' (delete) | 'r' (delete subtree,
   // then recreate). Insertion order = drain order.
   const pending = new Map();
+  // Mirrors pending, for paths the caller marks low priority (the package-manager
+  // caches). They ARE persisted — reused across projects and reloads — but a cold
+  // install enqueues thousands of store files, and draining those first delayed the
+  // user's own writes by minutes and kept the manifest from being written at all.
+  const pendingLow = new Map();
+  // Set by flush() (page hide): land the project paths and the index now, leave the
+  // caches queued — a hiding tab must not wait for a cold install to finish.
+  let flushUrgent = false;
   let draining = false;
   let manifestDirty = false;
   // The manifest is the WHOLE index serialized in one go, so its cost is O(paths
@@ -126,18 +141,24 @@ export async function createOpfsPersistence({ access, shouldPersist = () => true
   }
 
   // ---- the write-behind queue ----------------------------------------------
+  function queueFor(path) {
+    return isLowPriority(path) ? pendingLow : pending;
+  }
   function onWrite(path) {
     if (!shouldPersist(path)) return;
+    const queue = queueFor(path);
     // A delete followed by a write must not leave old descendants on disk.
-    pending.set(path, pending.get(path) === "d" || pending.get(path) === "r" ? "r" : "w");
+    queue.set(path, queue.get(path) === "d" || queue.get(path) === "r" ? "r" : "w");
     kick();
   }
   function onDelete(path) {
     if (!shouldPersist(path)) return;
-    // Drop any queued writes under this subtree — they're moot now.
+    // Drop any queued writes under this subtree — they're moot now. Both queues are
+    // swept: a directory can hold project paths and cache paths at once.
     const pre = path + "/";
-    for (const k of [...pending.keys()]) if (k === path || k.startsWith(pre)) pending.delete(k);
-    pending.set(path, "d");
+    for (const queue of [pending, pendingLow])
+      for (const k of [...queue.keys()]) if (k === path || k.startsWith(pre)) queue.delete(k);
+    queueFor(path).set(path, "d");
     kick();
   }
   function onRename(from, to) {
@@ -154,10 +175,13 @@ export async function createOpfsPersistence({ access, shouldPersist = () => true
   async function drain() {
     draining = true;
     try {
-      while (pending.size) {
-        const path = pending.keys().next().value;
-        const op = pending.get(path);
-        pending.delete(path);
+      for (;;) {
+        // Project paths always win; cache paths only run with nothing urgent queued.
+        const queue = pending.size ? pending : !flushUrgent && pendingLow.size ? pendingLow : null;
+        if (!queue) break;
+        const path = queue.keys().next().value;
+        const op = queue.get(path);
+        queue.delete(path);
         try {
           if (op === "d" || op === "r") {
             await removePath(path);
@@ -178,11 +202,17 @@ export async function createOpfsPersistence({ access, shouldPersist = () => true
         } catch {
           /* keep draining; a single bad entry shouldn't wedge the queue */
         }
+        // The manifest is the only durable statement of what is on disk, so under a
+        // long backlog it must not wait for the queue to empty: that is how a reload
+        // can restore a tree that is minutes older than what OPFS already holds.
+        if (manifestDirty && Date.now() - lastManifestWrite >= MANIFEST_MIN_INTERVAL_MS)
+          await maybeWriteManifest(false);
       }
       if (manifestDirty) await maybeWriteManifest(false);
     } finally {
       draining = false;
-      if (pending.size) drain(); // work arrived while we were finishing
+      // Work arrived while we were finishing (cache work waits for flush()).
+      if ((pending.size || pendingLow.size) && !flushUrgent) drain();
     }
   }
 
@@ -218,15 +248,24 @@ export async function createOpfsPersistence({ access, shouldPersist = () => true
 
   // Force everything queued to hit disk (best-effort; used on page hide).
   async function flush() {
-    if (draining) {
-      // wait for the in-flight drain to settle, then ensure a final pass
-      while (draining) await new Promise((r) => setTimeout(r, 0));
+    // Promise only the project paths (plus the index). Waiting for a cold install's
+    // thousands of cache files would mean the tab closes before the user's own edits
+    // reach the manifest.
+    flushUrgent = true;
+    try {
+      if (draining) {
+        // wait for the in-flight drain to settle, then ensure a final pass
+        while (draining) await new Promise((r) => setTimeout(r, 0));
+      }
+      if (pending.size) await drain();
+      // Unconditionally force the manifest: drain() only coalesces it, so a debounced
+      // write may still be outstanding even with an empty queue. This is the one place
+      // durability is promised, so it must not be skipped.
+      await maybeWriteManifest(true);
+    } finally {
+      flushUrgent = false;
+      if (pending.size || pendingLow.size) kick();
     }
-    if (pending.size) await drain();
-    // Unconditionally force the manifest: drain() only coalesces it, so a debounced
-    // write may still be outstanding even with an empty queue. This is the one place
-    // durability is promised, so it must not be skipped.
-    await maybeWriteManifest(true);
   }
 
   // ---- boot restore --------------------------------------------------------

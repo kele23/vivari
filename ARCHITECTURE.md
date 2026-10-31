@@ -256,6 +256,11 @@ only wired when `VV_DEBUG` is set, so non-debug runs never allocate it.
   reused by later projects and after a reload. The kernel's transient outbound-fetch
   buffer (`/var/cache/vv-fetch`) is excluded because its index is rebuilt per session
   and never read back, so npm's cache is the single durable copy.
+  **Drain priority:** project paths drain ahead of those cache paths (a cold install
+  enqueues thousands of store files) and the manifest is rewritten while the queue is
+  busy, so a reload never restores an index that is minutes behind what OPFS already
+  holds. `flush()` on page-hide promises the project paths plus the index, then
+  returns without waiting for the cache backlog.
 - **Dependency cache** (`packages/kernel-host/dep-cache.js`, stored under `vv-depcache/` in OPFS):
   layered on top of the mirror. A lockfile-keyed snapshot of a whole `node_modules` tree
   (`dep-cache-{has,save,restore}` messages against the in-worker VFS, exposed to the kernel as

@@ -195,6 +195,37 @@ try {
     );
     ok(!r.entries.has("/z") && !r.entries.has("/z/f.txt"), "a deleted subtree stays deleted");
   }
+
+  console.log("\n== a cold cache flood must not delay a project write ==");
+  {
+    // The mirror persists the package-manager caches, and a cold install enqueues
+    // thousands of store files. A project write made during that flood used to sit
+    // behind the whole cache queue — and a reload discards the in-memory queue, so
+    // the edit was simply lost. It must be durable after flush() while the rest of
+    // the cache queue is still pending.
+    const lowPrefix = "/home/user/.cache/pnpm/";
+    const storage = fakeOpfs();
+    Object.defineProperty(globalThis, "navigator", { configurable: true, value: { storage } });
+    const vfs = fakeVfs();
+    const persistence = await createOpfsPersistence({
+      access: vfs,
+      isLowPriority: (p) => p.startsWith(lowPrefix),
+    });
+    for (let i = 0; i < 200; i++) {
+      const p = lowPrefix + "file-" + i + ".json";
+      vfs.writeFile(p, bytes("cache"));
+      persistence.onWrite(p);
+    }
+    vfs.writeFile("/home/user/projects/app/src/App.tsx", bytes("project"));
+    persistence.onWrite("/home/user/projects/app/src/App.tsx");
+    await persistence.flush();
+
+    const reopened = fakeVfs();
+    await (await createOpfsPersistence({ access: reopened })).restore();
+    const app = reopened.entries.get("/home/user/projects/app/src/App.tsx");
+    ok(app?.kind === "file" && text(app.bytes) === "project", "the project write survives the flush");
+    ok(!reopened.entries.has(lowPrefix + "file-199.json"), "…and flush() did not wait for the cache queue");
+  }
 } finally {
   Object.defineProperty(globalThis, "navigator", { configurable: true, value: originalNavigator });
 }

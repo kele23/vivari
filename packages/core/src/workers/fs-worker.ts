@@ -262,6 +262,24 @@ const isVolatileCachePath = (p) => {
   return p.includes("/_logs/") || p.endsWith("/_logs") || p.includes("/tmp/") || p.endsWith("/tmp");
 };
 
+// Package-manager caches are persisted on purpose (see npm_config_cache in
+// kernel-worker.ts), but a cold install enqueues thousands of store files. The
+// mirror drains them as background work: project paths must never wait behind
+// them, or a reload restores a stale index and loses the user's own edits.
+const PM_CACHE_PREFIXES = [
+  "/home/user/.local/share/pnpm", // pnpm content-addressed store
+  "/home/user/.cache/pnpm", // pnpm registry metadata cache
+  "/home/user/.cache/npm", // npm cacache (its debug log is pruned separately)
+  "/home/user/.cache/yarn",
+  "/home/user/.cache/corepack",
+  "/home/user/.local/share/corepack",
+  "/home/user/.npm",
+  "/home/user/.yarn",
+  "/home/user/.bun",
+];
+const isPmCachePath = (p) =>
+  PM_CACHE_PREFIXES.some((pre) => p === pre || p.startsWith(pre + "/"));
+
 const shouldPersist = (p) => {
   // node_modules is NOT mirrored file-by-file: it's large (thousands of files),
   // which made the per-file OPFS restore the dominant cold-reopen cost. Instead
@@ -341,7 +359,11 @@ async function createOpfsDepStorage() {
   accessRef = buildAccess(vfs);
   try {
     if (typeof navigator !== "undefined" && navigator.storage && navigator.storage.getDirectory) {
-      persistence = await createOpfsPersistence({ access: accessRef, shouldPersist });
+      persistence = await createOpfsPersistence({
+        access: accessRef,
+        shouldPersist,
+        isLowPriority: isPmCachePath,
+      });
       // Restoring a saved project (esp. its node_modules) can take a while — the
       // VFS is re-hydrated entry-by-entry. Report progress so the user knows the
       // "stall" is real work, not a hang. Only chatter when there's a lot to do.
