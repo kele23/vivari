@@ -12,8 +12,10 @@ upstream as small PRs, everything else is justified and recorded here.
 - **Fork-only, by decision:**
   - `BootOptions.deferRestoreRoots` / `vv-restore-roots` (`8fd62fe`)
   - `BootOptions.deferCacheFiles` (`7725413`)
-  - pnpm config moved out of the base process environment (`c20e0e9`) — it matters only
-    with the vendored npm 12 pin, which upstream does not carry.
+  - pnpm config moved out of the base process environment (`c20e0e9`) — the pnpm shim sets it
+    in pnpm's own process instead of the environment every command inherits. It was written for
+    the npm 12.2.1 pin and is kept now that the pin is gone: those are `npm_config_*` names, so
+    an npm invocation in the same environment sees another package manager's configuration.
 - **Scope: the whole project except `packages/studio`.** The Studio IDE app is the downstream
   product's business: it keeps its own fork of it (`ide/` in `facilis-dev/facilis`) and its
   own copy of the preview Service Worker (`ide/public/sw.js`). One coupling to know —
@@ -52,8 +54,6 @@ upstream as small PRs, everything else is justified and recorded here.
   carries 10.9.2, which is where the branch had settled.
 - `1fc1094` cannot go upstream alone: it fixes `hydrate()`, which only exists after
   `8fd62fe`.
-- `c8ae8ed` (npm 12.2.1) is a chore coupled to `c20e0e9`; the bump was completed in
-  `9aa7682` (version gates, vendor provisioning and current-state docs now match the pin).
 
 ## Removed fork-only work
 
