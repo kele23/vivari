@@ -92,6 +92,12 @@ the releases the code is actually on. Delete a PR branch when its PR merges — 
 survive upstream, and a branch left behind is a claim the fork still carries work it does
 not.
 
+Four `backup/*` refs stay **local only** and are never pushed:
+`backup/facilis-main-2026-10-31`, `…-2026-10-31-sync1`, `…-2026-11-03` and
+`backup/pr35-pre-rebase` are the pre-rebase states of `facilis/main` and of PR #35. They
+are the only record of the commits a rebase dropped, so they are kept while the drop list in
+this file still refers to them by sha.
+
 ## Syncing with upstream
 
 **This is a standing task, not a one-off: realign after every batch of changes and whenever
