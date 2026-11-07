@@ -45,9 +45,12 @@ This checkout is `kele23/vivari`, a fork of upstream; the full record is
   surface is discussed in an upstream issue first and stays fork-only until then.
 - **`facilis/main` stays rebased on `upstream/master`, and `master` is exactly upstream.**
   Realigning is a standing task, not a cleanup: after every batch of changes (and whenever
-  upstream moves) run the sync block in [`FORK.md`](./FORK.md), then
-  `git push --force-with-lease origin facilis/main`. The downstream product pins this branch,
-  so a stale fork is a fix it cannot test.
+  upstream moves) run the sync block in [`FORK.md`](./FORK.md). It ends by pushing three
+  things — `origin/master`, the upstream tags, and `facilis/main` — because "aligned" is
+  what a clone of the fork sees: leaving `origin/master` or the tags behind advertises a base
+  the code has not been on, which is how the fork drifted a release plus four commits while
+  `facilis/main` itself was current. The downstream product pins `facilis/main`, so a stale
+  fork is a fix it cannot test.
 
 ## Folder structure
 
