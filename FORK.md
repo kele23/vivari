@@ -77,9 +77,20 @@ Reported there as issues, never implemented here:
 
 ## Branch hygiene
 
-The five `fix/*` branches merged upstream (PRs #19–#23) and the `facilis/pre-v1.1.5`
-pre-rebase backup were deleted from `origin` on 2026-10-31. `facilis/main`, `master` and
-the three open-PR branches remain; delete those when their PRs merge.
+`origin` carries two branches and nothing else: `facilis/main` (the one the downstream
+pins) and `master` (a mirror of `upstream/master`, nothing committed on it). Both are
+pushed by the sync block below, so a clone can see which upstream commit the fork is on
+without fetching upstream first.
+
+The five `fix/*` branches merged upstream in PRs #19–#23 and the `facilis/pre-v1.1.5`
+pre-rebase backup were deleted on 2026-10-31. The four PR branches that stayed behind
+(#29 #30 #31 #35 — `fix/esm-comment-after-export`, `fix/vendor-stale-pack-version`,
+`fix/file-url-host`, `fix/file-url-host-v2`) were deleted on 2026-11-07, once every one of
+them was verified to be an ancestor of `upstream/master`: nothing on them exists only here.
+All upstream tags were pushed to `origin` at the same time, so the fork's tag list matches
+the releases the code is actually on. Delete a PR branch when its PR merges — the commits
+survive upstream, and a branch left behind is a claim the fork still carries work it does
+not.
 
 ## Syncing with upstream
 
@@ -91,20 +102,40 @@ the tree. Replay drops a fork commit whose patch upstream already merged; that i
 the PR landed.
 
 ```sh
-git fetch upstream
+git fetch upstream --tags
 git branch -f master upstream/master          # master tracks upstream exactly
 git checkout facilis/main
 git rebase upstream/master                     # fork-only commits stay on top
 node scripts/spike-esm.mjs                     # the offline gates that need no install
 node scripts/spike-bun-offline.mjs
+node scripts/spike-ci-tiers.mjs
 npm run spikes:offline                         # after npm install; Wasm spikes need npm run build
+git push origin master                         # fast-forward; the fork's mirror of upstream
+git push origin --tags                         # the release the tree is on
 git push --force-with-lease origin facilis/main
 ```
 
+**`master` and the tags are part of "aligned", not an optional extra.** Leaving them behind
+is the failure this block was extended for: on 2026-11-07 `facilis/main` was current and
+`origin/master` was still at `9c87dec` (the `v1.2.0` merge: one release and four commits
+behind) with only two of the twelve release tags pushed, so the fork advertised a base it
+had not been on for a week. The two pushes are fast-forwards and additive respectively —
+neither can rewrite `facilis/main`'s history, and the force-push is the last step on purpose.
+
 Realigned onto `upstream/master` (`a9e3aac`) on 2026-10-31: #29's merge dropped the fork's
 copy of it, #31's revert dropped nothing (the fork never carried the throw), and the 18
-remaining fork-only commits were replayed on top.
+remaining fork-only commits were replayed on top. Realigned again on `d2719f9` on 2026-11-03
+after #35 merged and `v1.2.1` was released. Checked on 2026-11-07: upstream had not moved
+(`d2719f9` was still `upstream/master`, `v1.2.1` still the latest release, no open PRs), so
+that run only closed the divergence in `origin`'s `master` and tags.
 
-Upstream `v1.2.0` is itself red in CI: `toolchain-gate`/`toolchain-floor` fail in the
-`ci-tiers` spike (the `needsWasm` spike-wiring check), the same failure as on `master` at
-`9c87dec`, so it is not caused by this fork's changes.
+Upstream `v1.2.0` was red in CI — `toolchain-gate`/`toolchain-floor` failed the `ci-tiers`
+spike — and the fork inherited that, which is why `scripts/spike-ci-tiers.mjs` was missing
+from this block: a gate that is red on the base cannot tell you anything about the branch.
+The cause was the gate itself, not the runtime: it found a job's spike list by matching the
+*first* filtered `--offline` line in `ci.yml`, and the node:sqlite step added ahead of the
+Wasm step became that line, so it reported 32 Wasm spikes as selected by no job. Fixed
+upstream in `78cd665` (find the step by name; `7b2d779` pinned the Node the sibling
+differential job compares against). It passes at `d2719f9`, so it is in the block now, and
+it is worth knowing the failure mode: a gate that locates its subject by "the first match"
+breaks when an unrelated step is inserted above it, and looks exactly like a product bug.
