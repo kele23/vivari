@@ -145,3 +145,19 @@ upstream in `78cd665` (find the step by name; `7b2d779` pinned the Node the sibl
 differential job compares against). It passes at `d2719f9`, so it is in the block now, and
 it is worth knowing the failure mode: a gate that locates its subject by "the first match"
 breaks when an unrelated step is inserted above it, and looks exactly like a product bug.
+
+Realigned onto `upstream/master` (`4fbb009`, tagged `v1.3.0`) on 2026-11-12: three upstream
+commits (pnpm 11, SDK `snapshot()`/`restore()`, terminal size). Nothing dropped — no fork-only
+commit was superseded, which is consistent with the fork having no PR in flight since #35. Two
+conflicts, both resolved as a union: `kernel-fs.js` adds upstream's `snapshotTree`/`restoreTree`
+next to the fork's `restoreRoots`, and `kernel-worker.ts` keeps the fork's "no pnpm config in
+the base process env" comment while dropping the block upstream's pnpm-11 commit had extended.
+
+**The pnpm commit needed a real fix to survive, and that is the one to remember.** pnpm 11
+reads only `pnpm_config_*`, never `npm_config_*`; upstream's fix was to give every setting in
+`baseProcEnv` both spellings. The fork's `c20e0e9` had moved those settings out of there into
+the pnpm shim, under the `npm_config_*` spelling alone — so replaying it verbatim would have
+left pnpm 11 with no config at all (its default non-persisted store and copy import method),
+and `spike-pnpm-studio`'s new `storeHonoured` gate would have been the only thing to say so.
+The shim now sets both spellings for its own process (`load-real-pnpm.js`), which is what makes
+the fork's premise — npm sees a clean environment — hold with pnpm 11 as the shipped PM.
