@@ -1,0 +1,32 @@
+# Local toolchain for the Rust/Wasm crates and the test tiers.
+#
+# `npm run build` shells out to `wasm-pack` and to a `rustup` that has the two Wasm
+# targets; the repo vendors neither, and CI installs them with actions
+# (dtolnay/rust-toolchain + jetli/wasm-pack-action). This file does the same for a
+# contributor or an agent:
+#
+#   mise install             # node (see .nvmrc) + rust + wasm-pack
+#   mise run wasm            # rustup targets + npm run build
+#   mise run verify          # headless end-to-end suite (needs `mise run wasm` first)
+#   mise run spikes:offline  # offline spike tier, including the needsWasm spikes
+#
+# Versions track what the repo documents and CI installs: Node 22 (floor and newest
+# 22.x are both covered by ci.yml), Rust stable, wasm-pack 0.13.x (what
+# jetli/wasm-pack-action installs). Nothing here overrides an activated mise in a
+# consumer checkout; it only applies inside this repository.
+[tools]
+node = "22"
+rust = "stable"
+"ubi:rustwasm/wasm-pack" = "0.13.1"
+
+[tasks.wasm]
+description = "Build the Rust/Wasm crates (VFS, codec, crypto, wasi-demo)"
+run = "rustup target add wasm32-unknown-unknown wasm32-wasip1 && npm run build"
+
+[tasks.verify]
+description = "Headless end-to-end suite (run `mise run wasm` first)"
+run = "npm run verify"
+
+[tasks."spikes:offline"]
+description = "Offline spike tier; needsWasm spikes run when `mise run wasm` has built"
+run = "node scripts/run-spikes.mjs --offline"

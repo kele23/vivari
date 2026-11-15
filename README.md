@@ -158,6 +158,9 @@ worker/      the Cloudflare Worker for wildcard per-port preview origins
 
 Prereqs: **Node `>=22.15`** (`engines.node`; `.nvmrc` says `22`, which resolves to the
 newest 22.x and is the version you want), plus Rust + `wasm-pack` for the Wasm crates.
+`mise install` provisions that local toolchain from [`mise.toml`](./mise.toml) (Node 22,
+Rust stable with the two Wasm targets, `wasm-pack`); `mise run wasm` = `npm run build`,
+`mise run verify` = `npm run verify`, `mise run spikes:offline` = the offline test tier.
 
 The build scripts import the studio's TypeScript directly, and Node only strips types
 unprompted from 22.18. On 22.15-22.17 that is handled for you — a one-line
