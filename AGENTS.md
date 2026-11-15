@@ -24,6 +24,15 @@ tool."
 For the full mental model (worker topology, syscall protocol, networking seams,
 event loop, native Wasm), read **[`ARCHITECTURE.md`](./ARCHITECTURE.md)**.
 
+## Local toolchain (mise)
+
+`mise.toml` + `mise.lock` pin the local toolchain for the Wasm crates and the test tiers:
+Node 22 (matches `.nvmrc`), Rust stable with `wasm32-unknown-unknown` and `wasm32-wasip1`,
+and wasm-pack. On a fresh checkout run `mise install`, then `mise run wasm` (the Wasm build,
+`npm run build`), `mise run verify` and `mise run spikes:offline`. CI installs the same pieces
+with actions (dtolnay/rust-toolchain, jetli/wasm-pack-action), not mise — keep the versions
+in `mise.toml` in step with `ci.yml` rather than bumping them locally.
+
 ---
 
 ## Fork policy (this repository)
@@ -81,6 +90,12 @@ packages/
                    listen/accept extension over one WebSocket; wire format in its header.
                    Reference relay: scripts/net-relay.mjs (see ARCHITECTURE §8.4b).
     opfs-persistence.js  write-behind mirror of the VFS to OPFS (survives reload).
+    mirror-lane.js       optional write-ahead JOURNAL lane for mirrored bodies, run in its
+                   OWN worker (core/src/workers/mirror-worker.js): one journal handle,
+                   one fsync per drain, stale-guarded replay at boot, Web-Locked to one
+                   tab. BootOptions.mirrorLane, default off.
+    mirror-lane-client.js  the FS worker's side of that protocol: ready/dead promises,
+                   posted-byte backpressure, single-flight flush, idempotent terminate.
     node-gyp-stub.js     node-gyp no-op stub (native builds non-fatal) for real npm.
     load-real-npm.js     unpack the vendored real-npm asset into the VFS + shim /bin/npm.
     load-real-tsgo.js     unpack the vendored TypeScript-7 (tsgo, Go/wasm) asset + shim /bin/tsc,/bin/tsgo.
@@ -295,6 +310,9 @@ packages/
                           run/attribution (projectDirByTerm, project-ready/-reload). Also the
                           generic SDK spawn protocol (proc-spawn/-input/-kill → proc-out/-exit).
       fs-worker.ts        hosts the File System Worker (VFS + OPFS).
+      mirror-worker.js    the optional mirror lane's worker (spawned BY the FS worker):
+                          takes the vv-vfs-journal Web Lock, replays a crashed journal
+                          before the VFS restore, serializes write/remove/flush.
       fetcher-worker.ts   outbound fetch() (npm downloads).
       process-worker.ts   one process = one worker (boots the runtime).
       (TS + `// @ts-nocheck`; bundled by Vite/esbuild, not the strict API build —
@@ -1191,6 +1209,34 @@ one write per second (forced on `flush()`), which brings it to ~144 MB. Rules:
 - This is write **churn**, not residency: the live mirror was ~134 MB before and after.
   It matters for OPFS I/O time, quota, and GC pressure — and much more in Incognito,
   where Chrome backs OPFS with memory instead of disk.
+
+### An async `onmessage` is not a queue, and a WAL is only write-ahead if the manifest follows it
+Both bugs in the first version of the mirror lane (`BootOptions.mirrorLane`) were ordering
+bugs between a durable write and the promise/state that references it — invisible in every
+headless tier, because OPFS only exists in a browser.
+
+- **`self.onmessage = (e) => { void handle(e) }` is NOT a queue.** Two `write()`s arriving
+  back to back start two handlers that interleave at their first `await`; two `flush()`es
+  can materialize the same pending op twice. Any worker whose handler owns state chains it:
+  `chain = chain.then(() => handle(e)).catch(...)` (see `mirror-worker.js`). Same class as
+  "an async event handler is not a mutex" everywhere else.
+- **`flush()` is write-ahead** (journal fsync FIRST, then rebuild per-path bodies), so when it
+  resolves the journal is durable — but the MANIFEST points at the BODIES, not the journal.
+  Writing the index before the drain's end-of-pass `lane.flush()` published paths whose only
+  copy was a journal that a later non-lane boot discards: restore then saw an index entry with
+  no file. Every manifest write in `opfs-persistence.js` is now a lane flush barrier — the
+  drain end, the mid-drain throttle, the debounce timer and the page-hide flush. The timer must
+  also decline to write while a drain is running, or it races that drain's flush.
+- A lane failure is **contained, not fatal**: disable it for the session, `terminate()` the
+  client (releases the journal handle + `vv-vfs-journal` Web Lock), log through `onLaneError`,
+  and re-queue every path handed to it since its last successful flush `in order` onto the
+  direct queue before the index may name them (`laneResidue` filters the index meanwhile).
+  `drain()` is kicked unawaited, so it must never reject through that path.
+- Crash replay is **stale-guarded**: a journal left by a crashed tab is replayed before the VFS
+  restore, but a record is skipped when the index no longer lists its path or the OPFS body is
+  newer than the record — that is what stops it rolling back a newer direct-path write. A boot
+  that does not use the lane calls `discardJournalIfUnlocked()`; a lane that does not take the
+  lock within 5 s is treated as unavailable and terminated.
 
 ### A fetched body must outlive its reader — and measure the VFS with compression ON
 `OP_FETCH` does not hand a process bytes; it materializes the response body at

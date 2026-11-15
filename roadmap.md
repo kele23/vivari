@@ -12056,3 +12056,34 @@ had. A downstream spike of the same shape measured a 200 × 3 KiB burst at 1 033
 15.6 ms and 1 000 edits at 4 290 ms → 99 ms, with restore unchanged; a tab whose lane
 cannot take the `vv-vfs-journal` Web Lock falls back to the direct path, which is also the
 default until an embedder opts in.
+
+**Mirror lane review fix (PR #3 follow-up).** Reviewing that lane found the speed won and
+the durability lost: the mirror had acquired a second durable state (the journal) without the
+ordering rules a WAL needs, and the bugs were all invisible in headless tiers because OPFS
+only exists in a browser.
+- `mirror-worker.js` was `self.onmessage = (e) => { void handle(e) }`. Two writes posted
+  back to back ran two handlers that interleaved at the first `await`, and two flushes could
+  materialize the same pending op twice. It is now a promise chain: one handler runs at a time.
+- The manifest was written on schedules that had no relation to `lane.flush()`: at the end of
+  a drain, in the mid-drain throttle branch, from the one-second debounce timer, and in the
+  page-hide flush. The journal is durable before the per-path bodies are, so a manifest written
+  in that window named paths whose only copy was a journal that the next non-lane boot
+  discards — restore saw an index entry with no file. Every manifest write is now a lane flush
+  barrier, the debounce timer declines while a drain is running, and a timer that does fire
+  flushes first. A flush that resolves with per-entry errors counts as failed: the lane
+  truncates the journal after reporting them, so "resolved" is not "on disk".
+- A lane error was contained by nothing: `drain()` is kicked unawaited, its per-entry
+  `catch` swallowed a rejected `lane.write`, and nothing disabled the lane. A failure now
+  disables the lane for the session, `terminate()`s the client (releasing the journal handle
+  and Web Lock), logs through `onLaneError`, and re-queues every path handed to the lane
+  since its last successful flush onto the direct queue IN ORDER, with a residue set keeping
+  the index from naming those paths until the direct pass runs.
+- `init()` replayed a crashed journal unconditionally, so a tab that crashed before a flush
+  could roll a NEWER direct-path write back on the next boot. Replay is now stale-guarded
+  against the mirror's own index and the body `lastModified` (see ARCHITECTURE §5), a boot
+  that does not use the lane calls `discardJournalIfUnlocked()`, and a lane that does not
+  answer within 5 s is terminated and treated as unavailable instead of stalling boot.
+The FS-worker/opfs-persistence side is what enforces the manifest barrier and the fallback;
+`node --check`, `tsc -p packages/core/tsconfig.workers.json` and `npm run typecheck:sdk`
+are green, and the lane core is exercised end to end against a fake OPFS in its own harness.
+A real-browser pass of the flag remains the gate for the performance claim.

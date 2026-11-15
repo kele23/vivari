@@ -67,14 +67,20 @@ export interface BootOptions {
    */
   deferCacheFiles?: boolean;
   /**
-   * Persist VFS file bodies through a journal in a dedicated worker instead of a
-   * per-file `createSyncAccessHandle → write → flush` on the FS worker's thread. Each
-   * mirrored file then costs one journal append plus a share of one flush per drain,
-   * which is roughly an order of magnitude less time stolen from syscalls (measured:
-   * ~4 ms per 3 KiB file before, ~0.1 ms after). The per-path OPFS files are still
-   * rebuilt, just after the journal is durable, so a reload restores the same tree.
-   * Falls back to the direct path when the lane cannot start (a second tab already
-   * owns the journal, private mode, no worker support).
+   * **Opt-in** (default `false`): persist VFS file bodies through an append-only journal
+   * in a dedicated worker instead of a per-file `createSyncAccessHandle → write → flush`
+   * on the FS-worker thread. The FS thread then only appends to one journal handle; the
+   * lane fsyncs the journal once per drain and rebuilds the per-path OPFS files
+   * afterwards, so a per-file fsync is traded for **one journal fsync per drain** (the
+   * speed win, measured at ~4 ms per 3 KiB file before and ~0.1 ms after). A tab crash is
+   * safe either way; an OS/power loss can drop the last drain's bodies, where the direct
+   * path fsynced each file. Only ONE tab
+   * on the origin owns the journal (a Web Lock); every other tab — and any tab where the
+   * lane cannot start (private mode, no worker support, a lane that hangs while taking
+   * the lock) — falls back to the direct path. A journal left by a crashed tab is replayed
+   * before the VFS restore, but the replay is guarded against newer direct-path writes:
+   * a record is skipped when the mirror's index no longer lists its path or when the OPFS
+   * body is newer than the record, and a boot that does not use the lane discards it.
    */
   mirrorLane?: boolean;
   /**

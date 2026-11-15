@@ -107,6 +107,9 @@ Key relationships:
   `MessagePort` for processes, a plain postMessage for the kernel's own fs access.
 - **The Fetcher Worker** performs all real outbound network (`fetch`), so a big
   npm tarball download/decompress never stalls syscall servicing.
+- **The mirror lane** (opt-in, §5 Persistence) is a **third-level** worker: the File
+  System Worker spawns `packages/core/src/workers/mirror-worker.js`, which owns the OPFS
+  journal, and falls back to mirroring directly when it cannot start.
 - The Kernel Worker also **spawns each Process Worker** and wires a
   `MessageChannel` between it and the File System Worker (its fs doorbell).
 - **Every worker on the boot path has an error path, and that is load-bearing.** A
@@ -281,6 +284,42 @@ only wired when `VV_DEBUG` is set, so non-debug runs never allocate it.
   busy, so a reload never restores an index that is minutes behind what OPFS already
   holds. `flush()` on page-hide promises the project paths plus the index, then
   returns without waiting for the cache backlog.
+  **Mirror lane (opt-in, `BootOptions.mirrorLane`):** the bodies can move off the FS
+  thread entirely. `kernel-host/mirror-lane-client.js` starts a THIRD worker
+  (`packages/core/src/workers/mirror-worker.js`) running `kernel-host/mirror-lane.js` over
+  one append-only journal, `vv-vfs/journal.wal`. The drain then posts one journal record per
+  body/delete instead of opening a sync access handle per file; the lane appends to the
+  journal and later rebuilds the per-path `files/…` bodies. Invariants (enforced in those
+  two files, and asserted at the integration boundary in `opfs-persistence.js`):
+  - **serialized/single-flight:** the lane's four methods run on one promise chain, so
+    concurrent calls and a `flush()` during a `write()` never interleave journal or state
+    mutations, and a second `flush()` queues behind the first instead of materializing twice.
+  - **ordered materialization:** the pending op log is ordered by LAST occurrence
+    (`Map` delete+set) and applied in that order, so "delete ancestor, write descendant" in
+    one batch keeps the descendant.
+  - **write-ahead, no per-file fsync:** `flush()` fsyncs the journal first, then rebuilds
+    bodies, then truncates the journal — rebuilt handles are deliberately NOT fsynced one
+    by one. That is the whole speed win, and it is why the JOURNAL is the durable state. A tab
+    crash is safe either way (the journal or the OS page cache still holds the bytes); an
+    OS/power loss between the body writes and the checkpoint can drop the batch, a deliberate
+    trade against the direct path's per-file fsync.
+  - **manifest-after-flush:** the index lives here, not in the lane, so every manifest write
+    (drain end, the mid-drain throttle, the debounce timer, the page-hide flush) waits for a
+    successful `lane.flush()` first. A manifest that named a journal-only body would restore
+    an index entry with no file. A gate on the debounce timer also keeps it from racing a
+    running drain.
+  - **guarded replay:** `init()` replays a crashed journal before the VFS restore,
+    order-preserving and stale-guarded against newer direct writes: a "w" record is skipped
+    unless the path is in the manifest and the OPFS body is not strictly newer than the record
+    (equal milliseconds re-apply, which is idempotent), and a "d" record is skipped when the
+    body is strictly newer. A torn tail is truncated and kept as a prefix;
+    `init()` never rejects over a malformed journal.
+  - **fallback:** only one tab can own the journal (the `vv-vfs-journal` Web Lock). Any other
+    tab — or a lane that fails, or does not answer within 5 s — is terminated and the FS
+    worker writes directly. A lane failure is contained: it is disabled for the session, and
+    every path handed to it since its last successful flush is re-queued onto the direct
+    path before the index may name it. A boot that does not use the lane calls
+    `discardJournalIfUnlocked()` so a stale journal cannot be replayed later.
   **Several tabs, one mirror:** OPFS is per origin, so every Studio tab on an origin
   restores the same tree and mirrors into the same directory and `manifest.json`. A
   tab's VFS does not see what another tab writes until it reloads. To keep tabs from
@@ -289,8 +328,12 @@ only wired when `VV_DEBUG` is set, so non-debug runs never allocate it.
   own `meta`. The merge and `restore()`'s read both run under the `vv-vfs-manifest` Web
   Lock. The live index is replaced by writing `manifest.json.new` and `move()`-ing it
   over (a copy where `move()` is missing); readers fall back to the staged copy and
-  retry, and an index that exists but will not parse is never overwritten. File bytes
-  are last-writer-wins: two tabs editing the same path keep whichever wrote last.
+  retry, and an index that exists but will not parse is never overwritten. File bytes are
+  last-writer-wins at the OPFS body — NOT "the newer edit wins": a tab rewrites a body
+  from its own in-memory VFS when its queue drains, so two tabs editing one path keep
+  whichever mirrored last, which can be the older edit. The journal lane does not change
+  that; it only means a crashed tab's replay cannot roll a newer direct write back (the
+  stale guard above).
   `vv-depcache/`'s index has the same shape of race and is not merged (see roadmap).
 - **Dependency cache** (`packages/kernel-host/dep-cache.js`, stored under `vv-depcache/` in OPFS):
   layered on top of the mirror. A lockfile-keyed snapshot of a whole `node_modules` tree
