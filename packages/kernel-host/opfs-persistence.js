@@ -23,12 +23,28 @@
 //   * On boot restore() replays a small manifest back into the VFS BEFORE the
 //     worker serves any syscall.
 //
+// Optional MIRROR LANE (BootOptions.mirrorLane; kernel-host/mirror-lane.js in a third
+// worker, see ARCHITECTURE "Persistence"). File bodies and deletes are appended to one
+// journal there instead of doing a synchronous open/write/flush/close per file on this
+// thread; this module still owns the manifest and the queue. Two invariants keep that
+// mirror honest, and the code below enforces both:
+//   * the manifest may name a path only after a SUCCESSFUL lane.flush(): the lane's
+//     journal is durable, but the per-path OPFS file the manifest points at is rebuilt
+//     by a flush. A crash between append and flush, or a later boot that does not use the
+//     lane (which discards the journal), would otherwise restore an index entry with no
+//     body — so every manifest write is a flush barrier.
+//   * a lane failure is CONTAINED: the lane is disabled for the rest of the session, its
+//     client terminated, and every path it accepted since its last successful flush is
+//     re-queued for the direct path before the index may name it.
+//
 // Layout under the origin's OPFS:
 //   vv-vfs/
 //     files/…            one real OPFS file per VFS file (bytes only)
 //     manifest.json      [ [path, {k,m,t}], … ] — the index: kind, mode, and
 //                        (for symlinks) target. Dirs/symlinks have no `files/`
 //                        entry, so the manifest is what recreates them.
+//     journal.wal        only with BootOptions.mirrorLane: the lane's write-ahead log.
+//                        Owned by mirror-lane.js (replay, truncate, discard).
 //
 // `access` is a small vfs-bound facade injected by the File System Worker
 // (read/walk/mkdirp/writeFile/symlink); this module never imports the wasm VFS
@@ -49,8 +65,16 @@ export async function createOpfsPersistence({
   // present, file bodies and deletes go through one journal handle there instead of a
   // per-file open/truncate/write/flush/close on this thread; the manifest stays here.
   lane = null,
+  // Called with ONE line when the lane fails and this session falls back to direct
+  // writes. Optional: a host without a console must still get the fallback, not a throw.
+  onLaneError = () => {},
+  // Watchdog for a lane worker that hangs instead of dying (see withFlushTimeout). Only
+  // tests override it; a materialization pass is well under this in practice.
+  laneFlushTimeoutMs = 30000,
 }) {
   if (lane) await lane.ready;
+  // False once the lane has failed; never retried in this session (see failLane).
+  let laneActive = !!lane;
   const origin = await navigator.storage.getDirectory();
   const base = await origin.getDirectoryHandle(ROOT_DIR, { create: true });
   const filesBase = await base.getDirectoryHandle(FILES_DIR, { create: true });
@@ -65,6 +89,16 @@ export async function createOpfsPersistence({
   // install enqueues thousands of store files, and draining those first delayed the
   // user's own writes by minutes and kept the manifest from being written at all.
   const pendingLow = new Map();
+  // Paths handed to the LANE since its last successful flush, in last-occurrence order
+  // (delete then set, so an entry moves to the end), exactly like `pending`. A lane
+  // flush is the only point at which its journal records become per-path OPFS files, so
+  // until it returns these are the paths a failure has to send back through the direct
+  // path. Cleared only by a successful lane.flush() or by failLane().
+  const laneBatch = new Map();
+  // Paths re-queued after a lane failure that the direct path has not processed yet. A
+  // manifest write filters them out (writeManifest): the index may not name a body the
+  // lane held but never rebuilt. Entries leave when the direct drain handles the path.
+  const laneResidue = new Set();
   // Set by flush() (page hide): land the project paths and the index now, leave the
   // caches queued — a hiding tab must not wait for a cold install to finish.
   let flushUrgent = false;
@@ -148,7 +182,23 @@ export async function createOpfsPersistence({
     return [h, name];
   }
   async function writeBytes(path, bytes) {
-    if (lane) return lane.write(path, bytes);
+    if (laneActive) {
+      // Recorded before the call: a lane.write() that never lands still hands this path
+      // to the lane, and failLane() has to give it back to the direct path.
+      laneBatch.delete(path);
+      laneBatch.set(path, "w");
+      try {
+        await withLaneTimeout(lane.write(path, bytes), "write");
+        return;
+      } catch (err) {
+        // A rejected lane write IS a lane failure (journal short write, dying worker).
+        // drain()'s generic per-entry catch would swallow it and keep using a broken lane,
+        // so dispatch it here; failLane() re-queues this path, and the rethrow keeps the
+        // entry's manifest bookkeeping out of this pass.
+        failLane(err);
+        throw err;
+      }
+    }
     const [dir, name] = await parentFor(path, true);
     const fh = await dir.getFileHandle(name, { create: true });
     const ah = await fh.createSyncAccessHandle();
@@ -174,7 +224,21 @@ export async function createOpfsPersistence({
     }
   }
   async function removePath(path) {
-    if (lane) return lane.remove(path);
+    if (laneActive) {
+      laneBatch.delete(path);
+      laneBatch.set(path, "d");
+      try {
+        await withLaneTimeout(lane.remove(path), "remove");
+        return;
+      } catch (err) {
+        // A failed lane delete is a lane failure, not a per-entry hiccup: failLane()
+        // disables the lane and re-queues this path (and its batch) for the direct path.
+        // Not rethrown — deleting an absent path is already tolerated below, and callers
+        // off the drain path (dropDeferred, restore's prune) must not see a rejection.
+        failLane(err);
+        return;
+      }
+    }
     try {
       const [dir, name] = await parentFor(path, false);
       await dir.removeEntry(name, { recursive: true });
@@ -282,6 +346,11 @@ export async function createOpfsPersistence({
       // the index for good.
       const batch = new Map(owned);
       owned.clear();
+      // A path a failed lane handed back is not on disk yet: listing it would name a body
+      // that may not exist (the lane's flush never completed). Its direct re-write re-owns
+      // it, so it lands in a later pass. mergeIntoIndex filters the same paths out of the
+      // no-index fallback below.
+      for (const path of laneResidue) batch.delete(path);
       try {
         await mergeIntoIndex(batch);
       } catch (err) {
@@ -310,6 +379,10 @@ export async function createOpfsPersistence({
     }
     manifestUnreadable = false;
     const onDisk = index.entries ?? new Map(meta);
+    // First boot, no index yet: `meta` is the best view this kernel has, minus the paths
+    // a failed lane still owes the direct path (see writeManifest's batch filter) — a
+    // manifest must not name a body the lane never rebuilt.
+    if (!index.entries) for (const path of laneResidue) onDisk.delete(path);
     for (const [path, op] of batch) {
       if (op === "d") onDisk.delete(path);
       else {
@@ -360,13 +433,149 @@ export async function createOpfsPersistence({
     if (!draining) drain();
   }
 
+  // Wait out an in-flight drain without starting a second one (two loops would interleave
+  // the queue). The drain's own finally re-kicks when new work arrived.
+  async function settleDrain() {
+    while (draining) await new Promise((r) => setTimeout(r, 0));
+  }
+
+  // Arm the one-shot index refresh. The callback must never write a manifest that races a
+  // lane flush: a manifest written while the lane still holds a path names a body that is
+  // not on disk (see the file header). So it defers to a running drain — whose end-of-pass
+  // flushes the lane and then writes a due index — and otherwise flushes the lane itself
+  // first. Re-arming is safe: maybeWriteManifest() arms this again when the minimum
+  // interval has not elapsed, so a quiet system cannot leave `manifestDirty` stuck.
+  function armManifestTimer(delayMs) {
+    if (manifestTimer || typeof setTimeout !== "function") return;
+    manifestTimer = setTimeout(() => {
+      manifestTimer = null;
+      if (!manifestDirty || draining) return; // the drain in flight writes it after its flush
+      void (async () => {
+        if (!(await flushLane())) return; // requeued paths: their drain writes the index
+        await maybeWriteManifest(true);
+      })();
+    }, delayMs);
+  }
+
+  // A lane worker that HANGS (rather than dies) leaves flush() pending forever: drain()
+  // would never finish and page-hide would spin in settleDrain(). The watchdog turns it into
+  // an ordinary lane failure — terminate() releases the journal handle and the Web Lock, and
+  // the batch is re-queued onto the direct path like any other failure.
+  // Used around every await on the lane, not just flush(): lane.write()/remove() return
+  // the client's byte-backpressure promise, and a worker that hangs while unacked bytes are
+  // over the 8 MiB mark would otherwise block drain() BEFORE any flush, so the flush watchdog
+  // would never run. `what` only names the operation in the error line.
+  function withLaneTimeout(run, what) {
+    let timer = null;
+    return Promise.race([
+      run,
+      new Promise((_, reject) => {
+        timer = setTimeout(
+          () => reject(new Error("lane " + what + " did not answer in " + laneFlushTimeoutMs + "ms")),
+          laneFlushTimeoutMs,
+        );
+      }),
+    ]).finally(() => {
+      if (timer !== null) clearTimeout(timer);
+    });
+  }
+
+  // Materialize the lane's journal records into per-path OPFS files. The journal is the
+  // durable copy only until this returns, so every manifest write calls this first.
+  // Returns false when the lane failed: failLane() has disabled it and put its paths back
+  // on the direct queue, so the caller must NOT write the manifest now (the next drain
+  // re-persists them directly and then writes the index).
+  async function flushLane() {
+    if (!laneActive) return true;
+    if (!laneBatch.size) return true; // nothing handed over since the last successful flush
+    try {
+      const result = await withLaneTimeout(lane.flush(), "flush"); // one fsync per drain, not per file
+      // The lane CONTAINS per-entry materialization failures: it reports them in
+      // result.errors and still truncates its journal, so "resolved" does not mean every
+      // body it accepted is on disk. The client cannot map an error line to a path, so the
+      // whole batch goes back through the direct path — a duplicate direct write is
+      // harmless, a manifest naming a journal-only body is not.
+      const errors = result && Array.isArray(result.errors) ? result.errors : [];
+      if (errors.length) {
+        failLane(new Error(String(errors[0]).trim()));
+        return false;
+      }
+      laneBatch.clear(); // every path the manifest could name is materialized now
+      return true;
+    } catch (err) {
+      failLane(err);
+      return false;
+    }
+  }
+
+  // A lane failure ends the lane for this session: it is not retried, because its journal
+  // may hold records whose per-path bodies were never rebuilt. Every path it accepted since
+  // the last successful flush goes back to the DIRECT queue in the same order as
+  // `laneBatch` (a deleted ancestor before a re-created descendant, or the recreate would
+  // be undone); `laneResidue` keeps the index from naming them until that drain runs.
+  // terminate() releases the worker's journal handle and Web Lock (a failed worker must
+  // never keep holding them). kick() covers failures outside a drain — a debounce timer,
+  // dropDeferred(), the page-hide flush — where no loop is around to pick the paths up.
+  function failLane(err) {
+    if (!laneActive) return;
+    laneActive = false;
+    const batch = [...laneBatch];
+    laneBatch.clear();
+    // These ops are OLDER than anything still queued: drain() takes entries FIFO, so
+    // every batch op was already dequeued when it was handed to the lane, and whatever is
+    // queued now was enqueued after. PREPEND them, preserving their last-occurrence order,
+    // or a failed "delete /a" would be applied after a newer "write /a/b" and delete the
+    // file the VFS still holds. A newer queued op for the SAME path supersedes the batch
+    // one (the newer op stays where it is).
+    const prepend = new Map([
+      [pending, []],
+      [pendingLow, []],
+    ]);
+    for (const [path, op] of batch) {
+      laneResidue.add(path);
+      const queue = queueFor(path);
+      if (queue.has(path)) continue; // the newer queued op wins
+      // A failed delete re-runs as the direct path's "remove, then re-read the current
+      // truth" (op "r"). A batch can carry the delete of an ancestor that the VFS has
+      // since re-populated with a directory/symlink/file, and a bare "d" would leave the
+      // re-created node out of OPFS while the user still has it in the VFS.
+      prepend.get(queue).push([path, op === "d" ? "r" : op]);
+    }
+    for (const [queue, ops] of prepend) {
+      if (!ops.length) continue;
+      const newer = [...queue]; // in order, and all of it is newer than the batch
+      queue.clear();
+      for (const [path, op] of ops) queue.set(path, op);
+      for (const [path, op] of newer) if (!queue.has(path)) queue.set(path, op);
+    }
+    try {
+      lane.terminate();
+    } catch {
+      /* already gone */
+    }
+    const reason = err && err.message ? err.message : String(err);
+    try {
+      onLaneError("[opfs] mirror lane failed (" + reason + "); writing directly from now on");
+    } catch {
+      /* a host logger throwing must not turn a lane failure into a crash */
+    }
+    kick();
+  }
+
   async function drain() {
     draining = true;
     try {
       for (;;) {
         // Project paths always win; cache paths only run with nothing urgent queued.
         const queue = pending.size ? pending : !flushUrgent && pendingLow.size ? pendingLow : null;
-        if (!queue) break;
+        if (!queue) {
+          // Queue is empty, but the lane's journal is durable while its per-path files are
+          // not: the index may not be written before the lane flush succeeds. A failed
+          // flush re-queues the lane's paths, so loop again and let the DIRECT path
+          // re-persist them before the manifest can name them.
+          if (laneActive && !(await flushLane())) continue;
+          break;
+        }
         const path = queue.keys().next().value;
         const op = queue.get(path);
         queue.delete(path);
@@ -395,16 +604,23 @@ export async function createOpfsPersistence({
           }
         } catch {
           /* keep draining; a single bad entry shouldn't wedge the queue */
+        } finally {
+          // A path a failed lane handed back is on the direct path (or its write failed,
+          // which is the direct path's existing best-effort behaviour) as of now, so the
+          // index may name it again from the next manifest write on. EXCEPT when this very
+          // iteration is what failed and re-queued it: then it keeps blocking the index
+          // until a later pass actually runs it directly.
+          if (!pending.has(path) && !pendingLow.has(path)) laneResidue.delete(path);
         }
         // The manifest is the only durable statement of what is on disk, so under a
         // long backlog it must not wait for the queue to empty: that is how a reload
-        // can restore a tree that is minutes older than what OPFS already holds.
-        if (manifestDirty && Date.now() - lastManifestWrite >= MANIFEST_MIN_INTERVAL_MS)
+        // can restore a tree that is minutes older than what OPFS already holds. The
+        // lane is the exception: it is flushed first, or the write is skipped this pass.
+        if (manifestDirty && Date.now() - lastManifestWrite >= MANIFEST_MIN_INTERVAL_MS) {
+          if (laneActive && !(await flushLane())) continue;
           await maybeWriteManifest(false);
+        }
       }
-      // One fsync per drain instead of one per file: the lane's journal is the durable
-      // copy until this returns, and only after it are the per-path files rebuilt.
-      if (lane) await lane.flush();
       if (manifestDirty) await maybeWriteManifest(false);
     } finally {
       draining = false;
@@ -415,19 +631,19 @@ export async function createOpfsPersistence({
 
   // Write the manifest, unless one went out less than MANIFEST_MIN_INTERVAL_MS ago —
   // in which case arm a timer so the index still lands promptly once writes stop.
-  // `force` (flush / page-hide) always writes.
+  // `force` (flush / page-hide) always writes. Either way this is a lane FLUSH BARRIER:
+  // the index may only name bodies the lane has already rebuilt.
   async function maybeWriteManifest(force) {
     if (!manifestDirty) return;
     const since = Date.now() - lastManifestWrite;
     if (!force && since < MANIFEST_MIN_INTERVAL_MS) {
-      if (!manifestTimer && typeof setTimeout === "function") {
-        manifestTimer = setTimeout(() => {
-          manifestTimer = null;
-          void maybeWriteManifest(true);
-        }, MANIFEST_MIN_INTERVAL_MS - since);
-      }
+      armManifestTimer(MANIFEST_MIN_INTERVAL_MS - since);
       return;
     }
+    // Covers the paths that reach here without a drain: the debounce timer, dropDeferred().
+    // On failure the lane's paths have been requeued; the next drain persists them directly
+    // and writes the index, so do not write one that names a journal-only body.
+    if (!(await flushLane())) return;
     if (manifestTimer) {
       clearTimeout(manifestTimer);
       manifestTimer = null;
@@ -451,12 +667,18 @@ export async function createOpfsPersistence({
     // reach the manifest.
     flushUrgent = true;
     try {
-      if (draining) {
-        // wait for the in-flight drain to settle, then ensure a final pass
-        while (draining) await new Promise((r) => setTimeout(r, 0));
-      }
+      // Wait for the in-flight drain to settle, then ensure a final pass.
+      await settleDrain();
       if (pending.size) await drain();
-      if (lane) await lane.flush();
+      // drain() flushes the lane at the end of its pass; this covers a pass that ran no
+      // entries but left bodies in the lane. A failure HERE re-queues the lane's paths,
+      // and they are re-persisted directly (best effort) before the forced index write:
+      // the page-hide promise is "the index only names what is on disk", not "the index is
+      // written at any cost" — a manifest that names a journal-only body loses data.
+      if (laneActive && !(await flushLane())) {
+        await settleDrain();
+        if (pending.size) await drain();
+      }
       // Unconditionally force the manifest: drain() only coalesces it, so a debounced
       // write may still be outstanding even with an empty queue. This is the one place
       // durability is promised, so it must not be skipped.
