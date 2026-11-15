@@ -706,6 +706,7 @@ export class KernelBridge {
     netRelay?: string,
     deferRestoreRoots?: readonly string[],
     deferCacheFiles?: boolean,
+    mirrorLane?: boolean,
   ) {
     this.worker.postMessage({
       type: "init",
@@ -713,6 +714,7 @@ export class KernelBridge {
       netRelay: netRelay || undefined,
       deferRestoreRoots: deferRestoreRoots?.length ? [...deferRestoreRoots] : undefined,
       deferCacheFiles: deferCacheFiles || undefined,
+      mirrorLane: mirrorLane || undefined,
     });
   }
 

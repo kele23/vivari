@@ -12079,3 +12079,17 @@ Each fix has an offline gate that fails without it (`spike-terminal-tty`, `spike
 and the `IPCJSON` case in `verify-node`). Checked in review by reverting each fix and
 re-running its gate. The author tested in the Nuxt playground on Chromium and the iOS 26.5
 Simulator; the Studio itself was not part of that test.
+
+**Mirror lane.** The OPFS mirror wrote each file with its own
+`createSyncAccessHandle → truncate → write → flush → close`, on the same thread that
+serves every fs syscall, and rewrote the whole manifest every second. Measured on a 16-core
+Chrome 156 through the downstream studio: ~4 ms per 3 KiB file, of which ~2.3 ms is the
+`flush`. `BootOptions.mirrorLane` moves the bodies to `kernel-host/mirror-lane.js` in its
+own worker: the FS worker appends a record to one open journal handle (no fsync), the lane
+flushes once per drain and rebuilds the per-path files afterwards, and `init()` replays a
+journal left by a crash before the VFS restore reads anything. The manifest and its
+multi-tab merge stay in `opfs-persistence.js`, so the index keeps the semantics it already
+had. A downstream spike of the same shape measured a 200 × 3 KiB burst at 1 033 ms →
+15.6 ms and 1 000 edits at 4 290 ms → 99 ms, with restore unchanged; a tab whose lane
+cannot take the `vv-vfs-journal` Web Lock falls back to the direct path, which is also the
+default until an embedder opts in.
