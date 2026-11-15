@@ -23,6 +23,7 @@
 import initKernel, { VirtualFileSystem } from "../../../vfs/pkg/vivari_vfs.js";
 import { FsServer } from "../../../kernel-host/fs-server.js";
 import { createOpfsPersistence } from "../../../kernel-host/opfs-persistence.js";
+import { createMirrorLaneClient } from "../../../kernel-host/mirror-lane-client.js";
 import { createDepCache, snapshotTreeOp, restoreTreeOp } from "../../../kernel-host/dep-cache.js";
 import {
   decodeBytes,
@@ -59,6 +60,9 @@ let deferRestoreRoots = null;
 // and stat normally — so each body is replayed the first time a syscall reads it
 // (see installDeferredHydration).
 let deferCacheFiles = false;
+// Persist file bodies through the journal worker (BootOptions.mirrorLane) instead of a
+// per-file open/truncate/write/flush/close on this worker's thread.
+let mirrorLane = false;
 // POSIX O_TRUNC from Node's fs.constants (the runtime passes these straight through).
 const O_TRUNC = 0o1000;
 const queue = []; // messages that arrive before the VFS finishes booting
@@ -252,6 +256,12 @@ self.onmessage = (event) => {
   if (d && d.type === "fs-defer-roots") {
     deferRestoreRoots = Array.isArray(d.roots) ? d.roots.map(String) : [];
     deferCacheFiles = d.cacheFiles === true;
+    return;
+  }
+  // BootOptions.mirrorLane: same channel as the two gates above, because it must be known
+  // before the OPFS restore opens the lane (a crashed journal is replayed there).
+  if (d && d.type === "fs-mirror-lane") {
+    mirrorLane = d.on !== false;
     return;
   }
   if (server) handle(d);
@@ -510,10 +520,27 @@ async function createOpfsDepStorage() {
   accessRef = buildAccess(vfs);
   try {
     if (typeof navigator !== "undefined" && navigator.storage && navigator.storage.getDirectory) {
+      // BootOptions.mirrorLane: hand file bodies to a dedicated OPFS worker that journals
+      // them and rebuilds the per-path files off this thread (kernel-host/mirror-lane.js).
+      // A lane that cannot start (another tab holds the journal, private mode, no worker)
+      // falls back to the direct write path.
+      let lane = null;
+      if (mirrorLane) {
+        try {
+          const worker = new Worker(new URL("./mirror-worker.js", import.meta.url), { type: "module" });
+          lane = createMirrorLaneClient(worker);
+          await lane.ready;
+        } catch (error) {
+          const reason = error && error.message ? error.message : String(error);
+          post("log", { line: "  [opfs] mirror lane unavailable (" + reason + "), writing directly", cls: "muted" });
+          lane = null;
+        }
+      }
       persistence = await createOpfsPersistence({
         access: accessRef,
         shouldPersist,
         isLowPriority: isPmCachePath,
+        lane,
       });
       // Restoring a saved project (esp. its node_modules) can take a while — the
       // VFS is re-hydrated entry-by-entry. Report progress so the user knows the

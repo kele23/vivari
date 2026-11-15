@@ -45,7 +45,12 @@ export async function createOpfsPersistence({
   access,
   shouldPersist = () => true,
   isLowPriority = () => false,
+  // Optional write-ahead lane (kernel-host/mirror-lane.js, in its own worker). When
+  // present, file bodies and deletes go through one journal handle there instead of a
+  // per-file open/truncate/write/flush/close on this thread; the manifest stays here.
+  lane = null,
 }) {
+  if (lane) await lane.ready;
   const origin = await navigator.storage.getDirectory();
   const base = await origin.getDirectoryHandle(ROOT_DIR, { create: true });
   const filesBase = await base.getDirectoryHandle(FILES_DIR, { create: true });
@@ -143,6 +148,7 @@ export async function createOpfsPersistence({
     return [h, name];
   }
   async function writeBytes(path, bytes) {
+    if (lane) return lane.write(path, bytes);
     const [dir, name] = await parentFor(path, true);
     const fh = await dir.getFileHandle(name, { create: true });
     const ah = await fh.createSyncAccessHandle();
@@ -168,6 +174,7 @@ export async function createOpfsPersistence({
     }
   }
   async function removePath(path) {
+    if (lane) return lane.remove(path);
     try {
       const [dir, name] = await parentFor(path, false);
       await dir.removeEntry(name, { recursive: true });
@@ -395,6 +402,9 @@ export async function createOpfsPersistence({
         if (manifestDirty && Date.now() - lastManifestWrite >= MANIFEST_MIN_INTERVAL_MS)
           await maybeWriteManifest(false);
       }
+      // One fsync per drain instead of one per file: the lane's journal is the durable
+      // copy until this returns, and only after it are the per-path files rebuilt.
+      if (lane) await lane.flush();
       if (manifestDirty) await maybeWriteManifest(false);
     } finally {
       draining = false;
@@ -446,6 +456,7 @@ export async function createOpfsPersistence({
         while (draining) await new Promise((r) => setTimeout(r, 0));
       }
       if (pending.size) await drain();
+      if (lane) await lane.flush();
       // Unconditionally force the manifest: drain() only coalesces it, so a debounced
       // write may still be outstanding even with an empty queue. This is the one place
       // durability is promised, so it must not be skipped.

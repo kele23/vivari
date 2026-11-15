@@ -208,6 +208,7 @@ export class Vivari {
         options.netRelay,
         options.deferRestoreRoots,
         options.deferCacheFiles,
+        options.mirrorLane,
       );
     } catch (err) {
       // teardown() settles `ready` through the TEARDOWN_MESSAGE above, so this
