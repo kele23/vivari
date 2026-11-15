@@ -13,7 +13,8 @@ Contributions of all kinds are welcome: bug reports, docs, tests, and code.
 
 - **Node.js `>=22`** (see `.nvmrc`). Several dev/test scripts rely on Node 22 APIs.
 - **Rust** + [`wasm-pack`](https://rustwasm.github.io/wasm-pack/) to build the
-  Wasm crates (VFS / codec / crypto).
+  Wasm crates (VFS / codec / crypto). Alternatively run `mise install`: [`mise.toml`](./mise.toml)
+  provisions Node, Rust (with `wasm32-unknown-unknown` and `wasm32-wasip1`) and `wasm-pack`.
 - A recent browser for the studio app.
 
 ## Getting started
