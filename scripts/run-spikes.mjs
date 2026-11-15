@@ -147,8 +147,20 @@ const SPIKES = [
   { name: "opfs-delete-recreate", file: "spike-opfs-delete-recreate.mjs", net: false, timeout: 60000 },
   // Two tabs on one origin share the mirror: the index is merged per kernel under a
   // Web Lock, replaced through a staged copy, and read under the same lock at boot.
-  // Same in-memory OPFS as above (scripts/lib/fake-opfs.mjs), no kernel, no Wasm.
+  // Same in-memory OPFS as above (scripts/lib/fake-opfs.mjs), no kernel, no Wasm. Besides
+  // the lane/client invariants it drives the SHIPPED createOpfsPersistence: the manifest is a
+  // lane-flush barrier, a failed/hung lane is contained and re-queued, and replay reads the
+  // index under the manifest lock.
   { name: "opfs-multitab", file: "spike-opfs-multitab.mjs", net: false, timeout: 60000 },
+  // The mirror lane (journal in its own worker) must never lose a write that the VFS
+  // acknowledged. Its failure modes are all invisible in a browser until a reload
+  // loses work: a batch whose delete lands after its write, an un-awaited write lost at
+  // the watermark, a write swallowed by an in-flight flush, a torn journal tail that
+  // refuses to boot, replay rolling back a newer direct write, one bad body wedging the
+  // lane, a stale journal replayed by a non-lane boot, and a client promise never
+  // settled on a worker fault. Drives the shipped mirror-lane.js + mirror-lane-client.js
+  // against the same in-memory OPFS as the two spikes above — no kernel, no Wasm.
+  { name: "opfs-mirror-lane", file: "spike-opfs-mirror-lane.mjs", net: false, timeout: 60000 },
   // The gates above read `public/vendor`, which is gitignored build output: it
   // survives between commands on a developer's machine and has never existed on
   // a fresh checkout. Three regressions came from that asymmetry, `predev` not

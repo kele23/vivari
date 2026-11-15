@@ -18,12 +18,17 @@
 // serving any syscall, but scoped: what the embedder defers (project roots, and
 // optionally the package-manager cache bodies) stays on OPFS and is replayed on
 // first use — see restore() and installDeferredHydration(). Afterwards FsServer
-// forwards mutations to the adapter.
+// forwards mutations to the adapter. With BootOptions.mirrorLane the file BODIES go to a
+// third worker (mirror-worker.js -> kernel-host/mirror-lane.js) that journals them and
+// rebuilds the per-path OPFS files off this thread; the manifest and its multi-tab merge
+// stay in this worker's adapter, which is why the index is only written after the lane
+// confirms a flush (a manifest must never name a body that is still journal-only).
 
 import initKernel, { VirtualFileSystem } from "../../../vfs/pkg/vivari_vfs.js";
 import { FsServer } from "../../../kernel-host/fs-server.js";
 import { createOpfsPersistence } from "../../../kernel-host/opfs-persistence.js";
 import { createMirrorLaneClient } from "../../../kernel-host/mirror-lane-client.js";
+import { discardJournalIfUnlocked } from "../../../kernel-host/mirror-lane.js";
 import { createDepCache, snapshotTreeOp, restoreTreeOp } from "../../../kernel-host/dep-cache.js";
 import {
   decodeBytes,
@@ -45,6 +50,24 @@ import {
 
 const post = (type, extra, transfer) =>
   self.postMessage({ type, ...extra }, transfer && transfer.length ? transfer : undefined);
+const logMuted = (line) => post("log", { line, cls: "muted" });
+
+// How long to wait for the mirror lane to take the vv-vfs-journal Web Lock and replay a
+// crashed journal. A lane stuck there must not stall boot: the direct path is the fallback.
+const MIRROR_LANE_READY_TIMEOUT_MS = 5000;
+async function withTimeout(promise, ms, reason) {
+  let timer = null;
+  try {
+    return await Promise.race([
+      promise,
+      new Promise((_, reject) => {
+        timer = setTimeout(() => reject(new Error(reason)), ms);
+      }),
+    ]);
+  } finally {
+    if (timer !== null) clearTimeout(timer);
+  }
+}
 
 let server = null;
 let vfsRef = null; // the live VFS, set as soon as it's constructed (pre-restore)
@@ -523,17 +546,43 @@ async function createOpfsDepStorage() {
       // BootOptions.mirrorLane: hand file bodies to a dedicated OPFS worker that journals
       // them and rebuilds the per-path files off this thread (kernel-host/mirror-lane.js).
       // A lane that cannot start (another tab holds the journal, private mode, no worker)
-      // falls back to the direct write path.
+      // falls back to the direct write path, and a lane that HANGS while taking the lock is
+      // the same case after MIRROR_LANE_READY_TIMEOUT_MS: terminate it, never half-use it.
       let lane = null;
       if (mirrorLane) {
+        let client = null;
         try {
-          const worker = new Worker(new URL("./mirror-worker.js", import.meta.url), { type: "module" });
-          lane = createMirrorLaneClient(worker);
-          await lane.ready;
+          const worker = new Worker(new URL("./mirror-worker.js", import.meta.url), {
+            type: "module",
+          });
+          client = createMirrorLaneClient(worker, { onLog: logMuted });
+          await withTimeout(
+            client.ready,
+            MIRROR_LANE_READY_TIMEOUT_MS,
+            "no journal lock after " + MIRROR_LANE_READY_TIMEOUT_MS + "ms",
+          );
+          lane = client;
         } catch (error) {
           const reason = error && error.message ? error.message : String(error);
-          post("log", { line: "  [opfs] mirror lane unavailable (" + reason + "), writing directly", cls: "muted" });
+          logMuted("  [opfs] mirror lane unavailable (" + reason + "), writing directly");
+          // Terminate even on a timeout: the worker may still be holding the journal handle
+          // and the Web Lock, and a failed lane must never keep either.
+          if (client) client.terminate();
           lane = null;
+        }
+      }
+      if (!lane) {
+        // A boot that does not use the lane invalidates any journal a crashed lane left
+        // behind, so a LATER lane boot cannot replay it over the direct writes made here
+        // (the replay is also stale-guarded, but an absent journal is unambiguous). This
+        // returns false when a LIVE lane in another tab owns the lock, which is correct:
+        // that tab's journal is not stale. Only a real removal is worth a log line.
+        try {
+          if (await discardJournalIfUnlocked()) {
+            logMuted("  [opfs] discarded a journal left by a previous session");
+          }
+        } catch {
+          /* last resort: a journal cleanup failure must not stop the boot */
         }
       }
       persistence = await createOpfsPersistence({
@@ -541,6 +590,7 @@ async function createOpfsDepStorage() {
         shouldPersist,
         isLowPriority: isPmCachePath,
         lane,
+        onLaneError: logMuted,
       });
       // Restoring a saved project (esp. its node_modules) can take a while — the
       // VFS is re-hydrated entry-by-entry. Report progress so the user knows the
