@@ -161,3 +161,17 @@ left pnpm 11 with no config at all (its default non-persisted store and copy imp
 and `spike-pnpm-studio`'s new `storeHonoured` gate would have been the only thing to say so.
 The shim now sets both spellings for its own process (`load-real-pnpm.js`), which is what makes
 the fork's premise — npm sees a clean environment — hold with pnpm 11 as the shipped PM.
+
+Realigned onto `upstream/master` (`460ba69`, tagged `v1.3.1`) on 2026-11-15, the same day the
+mirror-lane fix merged as PR #4 (merge commit `c5a5d40`, two commits, `@vivari/core` changeset
+minor). Upstream's four commits were the v1.3.1 release (the nightlies' template-gate/spikes-net
+fixes: npm-target-platform for the `--cpu=wasm32` lock resolve, the ESM parse5 comment fix, the
+Ember HTML-entity decode) plus the release version bumps. Eighteen fork commits replayed. One
+conflict, resolved as a union: `roadmap.md`, where upstream appended its nightly-red section
+exactly where #3's mirror-lane entry appends — both sections are kept, and the lane's review-fix
+entry follows them. The lane files themselves replay byte-identical. Gates after the realign:
+`spike-esm`, `spike-bun-offline` and `spike-ci-tiers` PASS, `npm run verify` PASS, offline tier
+67/69 with the two expected host failures (`python-offline` needs the host pip; `clean-checkout`
+re-runs it on a tracked-only tree — the same pair fails on the pre-realign tree). Pre-rebase
+state kept local-only as `backup/facilis-main-2026-11-15` (`c5a5d40`).
+
