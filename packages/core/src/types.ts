@@ -67,6 +67,17 @@ export interface BootOptions {
    */
   deferCacheFiles?: boolean;
   /**
+   * Persist VFS file bodies through a journal in a dedicated worker instead of a
+   * per-file `createSyncAccessHandle → write → flush` on the FS worker's thread. Each
+   * mirrored file then costs one journal append plus a share of one flush per drain,
+   * which is roughly an order of magnitude less time stolen from syscalls (measured:
+   * ~4 ms per 3 KiB file before, ~0.1 ms after). The per-path OPFS files are still
+   * rebuilt, just after the journal is durable, so a reload restores the same tree.
+   * Falls back to the direct path when the lane cannot start (a second tab already
+   * owns the journal, private mode, no worker support).
+   */
+  mirrorLane?: boolean;
+  /**
    * The preview Service Worker. It must be served **same-origin** at a scope that
    * covers the URLs you want proxied into the VM (default scope `/`). Pass a URL
    * string to override the default (`"/sw.js"`), or `false` to skip registration

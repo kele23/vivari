@@ -12042,3 +12042,17 @@ report a readable done while chunks are still queued. The spike's scenarios comp
 only and could not see this, so a block added after the merge measures the timing on both
 sides and pins the difference: it goes red if the gap closes or moves. Measured in the Nuxt
 playground on a patched `@vivari/core` 1.3.3: `pnpm add canvas-confetti` finished in 12.2 s.
+
+**Mirror lane.** The OPFS mirror wrote each file with its own
+`createSyncAccessHandle → truncate → write → flush → close`, on the same thread that
+serves every fs syscall, and rewrote the whole manifest every second. Measured on a 16-core
+Chrome 156 through the downstream studio: ~4 ms per 3 KiB file, of which ~2.3 ms is the
+`flush`. `BootOptions.mirrorLane` moves the bodies to `kernel-host/mirror-lane.js` in its
+own worker: the FS worker appends a record to one open journal handle (no fsync), the lane
+flushes once per drain and rebuilds the per-path files afterwards, and `init()` replays a
+journal left by a crash before the VFS restore reads anything. The manifest and its
+multi-tab merge stay in `opfs-persistence.js`, so the index keeps the semantics it already
+had. A downstream spike of the same shape measured a 200 × 3 KiB burst at 1 033 ms →
+15.6 ms and 1 000 edits at 4 290 ms → 99 ms, with restore unchanged; a tab whose lane
+cannot take the `vv-vfs-journal` Web Lock falls back to the direct path, which is also the
+default until an embedder opts in.
