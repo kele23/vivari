@@ -92,11 +92,11 @@ the releases the code is actually on. Delete a PR branch when its PR merges — 
 survive upstream, and a branch left behind is a claim the fork still carries work it does
 not.
 
-Four `backup/*` refs stay **local only** and are never pushed:
-`backup/facilis-main-2026-10-31`, `…-2026-10-31-sync1`, `…-2026-11-03` and
-`backup/pr35-pre-rebase` are the pre-rebase states of `facilis/main` and of PR #35. They
-are the only record of the commits a rebase dropped, so they are kept while the drop list in
-this file still refers to them by sha.
+Six `backup/*` refs stay **local only** and are never pushed:
+`backup/facilis-main-2026-10-31`, `…-2026-10-31-sync1`, `…-2026-11-03`, `…-2026-11-15`,
+`…-2026-11-20` and `backup/pr35-pre-rebase` are the pre-rebase states of `facilis/main` and
+of PR #35. They are the only record of the commits a rebase dropped, so they are kept while
+the drop list in this file still refers to them by sha.
 
 ## Syncing with upstream
 
@@ -174,4 +174,22 @@ entry follows them. The lane files themselves replay byte-identical. Gates after
 67/69 with the two expected host failures (`python-offline` needs the host pip; `clean-checkout`
 re-runs it on a tracked-only tree — the same pair fails on the pre-realign tree). Pre-rebase
 state kept local-only as `backup/facilis-main-2026-11-15` (`c5a5d40`).
+
+Realigned onto `upstream/master` (`9372e5e`) on 2026-11-20: three releases since v1.3.1
+(v1.3.2, v1.3.3, v1.3.4) plus one post-release spike fix. v1.3.2 extracted the
+manifest-report rules into `packages/core/manifest-report.js` and named the mid-transfer
+2xx body as a transient shape; v1.3.3 fixed the UNIX-socket file (#44/#45, Nuxt 4's
+vite-node socket), sent COEP/CORP on the preview token redirect, and put `probe-xpipe` in
+CI; v1.3.4 gave `file:` URLs with a query/hash their own module (the Nuxt config reload)
+and web streams Node's closed-promise (the `pnpm add` stall), with the timing gap pinned;
+`9372e5e` makes `spike-web-globals`' browser-like streams work on Node 22. Nineteen fork
+commits replayed, nothing dropped — the pnpm-env commit passed unchanged this time. One
+conflict, resolved as a union: `roadmap.md`, where upstream appended its three release
+sections exactly where the mirror-lane paragraph appends — both kept, the lane paragraph
+last; the range-diff shows the other 18 commits byte-identical and the lane files
+unchanged. Gates after the realign: `spike-esm`, `spike-bun-offline` and `spike-ci-tiers`
+PASS, `npm run verify` PASS, offline tier 70/72 with the two expected host failures
+(`python-offline` needs the host pip; `clean-checkout` re-runs it on a tracked-only tree
+and reports the checkout is not the cause — the same pair fails on the pre-realign tree).
+Pre-rebase state kept local-only as `backup/facilis-main-2026-11-20` (`daceb39`).
 
