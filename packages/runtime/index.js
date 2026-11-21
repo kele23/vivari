@@ -1860,6 +1860,24 @@ export function createRuntime({
           if (rewritten != null) args = args.slice(0, -1).concat(rewritten);
         }
       }
+      // Breakpoint-debugger eval seam, sync half: `new Function` bodies and
+      // vm.compileFunction (which appends `//# sourceURL=<filename>`) never pass
+      // the require loader either. One global read per call — the same pattern as
+      // module.js's loader hook — and zero cost when no debug session is attached.
+      // instrumentEvaluated self-heals to null for anything it cannot safely
+      // weave, so the native build always remains the fallback. No dynamic-import
+      // rewrite is needed here beyond the one above. (vm.runInThisContext and the
+      // loader's own compileWrapper use INDIRECT eval, which no constructor seam
+      // can reach — out of scope; the loader path is instrumented at its source.)
+      const dh = globalThis.__vvDebugHook;
+      if (dh && dh.instrumentEvaluated && args.length && typeof args[args.length - 1] === "string") {
+        try {
+          const woven = dh.instrumentEvaluated(args[args.length - 1]);
+          if (typeof woven === "string" && woven.length) args = args.slice(0, -1).concat(woven);
+        } catch {
+          /* leave the body untouched — debugging never breaks a run */
+        }
+      }
       // Build via Reflect.construct so the caller's new.target is honored. This is
       // what keeps `class X extends Function {}` working: super() must produce a
       // function object whose [[Prototype]] is X.prototype (not a bare
@@ -2154,6 +2172,17 @@ export function createRuntime({
           });
           globalThis.__vvdbg = __dbg.__vvdbg;
           globalThis.__vvDebugHook = __dbg;
+          // SSR eval seam: Vite's ModuleRunner evaluates SSR modules through
+          // `new AsyncFunction(...)`, capturing the constructor from the intrinsic
+          // %AsyncFunction.prototype% AT IMPORT TIME — never through the require
+          // loader. Patch that constructor NOW, before the entry compiles (hence
+          // before vite loads), so SSR/backend bodies reach the instrumenter and
+          // their breakpoints bind. Debug-gated: nothing installs without VV_DEBUG.
+          try {
+            __dbg.installEvalSeam();
+          } catch {
+            /* seam is best-effort; the loader path still debugs */
+          }
           // --inspect-brk-style gate: block until the frontend has attached and sent
           // its breakpoints, so short synchronous entries still pause. Bounded so an
           // unattended debug run proceeds after a short delay.

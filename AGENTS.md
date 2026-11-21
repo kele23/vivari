@@ -115,7 +115,12 @@ packages/
                    guest's own source and weaves in __vvdbg probes + per-block
                    __vv_ev eval closures (only when the debug hook is set).
     debugger.js    in-guest CDP Debugger/Runtime backend (script registry,
-                   breakpoints, call frames, pause/step, evaluateOnCallFrame).
+                   breakpoints, call frames, pause/step, evaluateOnCallFrame) +
+                   the SSR eval seam (instrumentEvaluated/installEvalSeam) for
+                   constructor-built bodies that never pass the loader.
+    sourcemap.js   dependency-free source-map consumer for that seam: base64→UTF-8,
+                   VLQ decode, 1-based line mapper (toSource/toGenerated/
+                   toGeneratedAtOrAfter). Same lazy debug chunk as debugger.js.
     vendor/acorn.mjs  vendored acorn parser used ONLY by instrument.js; ships in a
                    lazy import() chunk so it costs nothing when debug is off.
     loop.js        the per-process event loop (nextTick→micro→timers→immediate).
@@ -358,7 +363,15 @@ scripts/
   spike-*.mjs          per-template/subsystem "does it boot + serve in-VM" proofs.
   spike-debugger.mjs   headless breakpoint-debugger proof (instrument + CDP backend +
                        real SAB channel + worker_threads pause→evaluate→resume).
-  lib/spike-harness.mjs   shared kernel-boot/install/waitListen/httpGet helper for spikes.
+  spike-debugger-ssr-seam.mjs  offline SSR eval-seam proof: the REAL vite ModuleRunner +
+                       ssrTransform (fake fetchModule transport) against createDebugger;
+                       dual-mode — a bare-tree fallback with an independent VLQ encoder
+                       oracle, since the CI toolchain gates run without node_modules.
+  spike-debugger-ssr.mjs  net + needsWasm IN-VM acceptance (kele23/vivari#5): a vite SSR
+                       backend under VV_DEBUG, breakpoint on the ORIGINAL .ts line →
+                       paused/evaluate/stepOver/resume over the real debug SAB.
+  lib/spike-harness.mjs   shared kernel-boot/install/waitListen/httpGet helper for spikes;
+                       forwards debugSab/debugLang so headless debug spikes attach.
   run-spikes.mjs       CI runner over the spikes (tiers: --offline / --net / --all).
                        Also PROVISIONS the gitignored build artifacts a spike needs
                        (VENDORS) — packed package managers, pyodide, and the shipped
@@ -368,7 +381,8 @@ scripts/
                        registry, every `needsWasm` one must be wired into CI, an
                        offline spike that boots a kernel must say needsWasm, and a
                        net spike reading the shipped locks must declare them.
-  process-worker.mjs / fs-worker.mjs   Node worker_threads entries for headless.
+  process-worker.mjs / fs-worker.mjs   Node worker_threads entries for headless;
+                       process-worker.mjs also routes dbg-cmd (the browser twin's handler).
   net-relay.mjs        the reference LOCAL network relay a developer runs for
                        BootOptions.netRelay / `?net=` (127.0.0.1 only, per-launch token).
   fixtures/napi-crc32/   vendored @node-rs/crc32 wasm32-wasi N-API addon (verify-node fixture).
@@ -5238,6 +5252,50 @@ a **second SAB** the paused worker parks on. Load-bearing details:
   (so `evaluateOnCallFrame`/Variables see the exact block scope, TDZ included). On
   **any parse failure it self-heals to the original source** — debugging must never
   break a run.
+- **Evaluated code never passes the loader — the eval seam is the second entry point.**
+  Vite's SSR ModuleRunner builds modules with `new AsyncFunction(...)` and
+  `vm.compileFunction` uses `new Function`; neither goes through `module.js`, so
+  SSR/backend breakpoints never bound. `debugger.js`'s `instrumentEvaluated(body)` weaves
+  the same probes into constructor-built bodies that name a project `sourceURL`, remapping
+  lines through the body's trailing inline source map (`sourcemap.js`). Two halves:
+  `installEvalSeam()` patches the AsyncFunction constructor (async), and `index.js`'s
+  `OcFunction` hook covers the sync half with one `__vvDebugHook` global read per call.
+- **There is no `globalThis.AsyncFunction` to patch — the ticket's premise was confuted.**
+  Vite captures `async function(){}.constructor` (the intrinsic
+  `%AsyncFunction.prototype%.constructor`) AT IMPORT TIME (`module-runner.js:23`), so a
+  bare global assignment is inert. The seam patches the intrinsic prototype's constructor
+  in the `VV_DEBUG` attach block, BEFORE the entry compiles (hence before vite loads), and
+  Vite then captures the patched one. Chosen over a vite-specific
+  `ESModulesEvaluator.prototype` wrap: generic, no vite-specific code in the runtime,
+  catches any evaluator. That constructor is also NON-WRITABLE (configurable), unlike
+  `Function.prototype.constructor` — plain assignment throws in strict mode, so it takes
+  `Object.defineProperty` (kept writable+configurable afterwards).
+- **The inline map is PRE-SHIFTED; probes report BODY lines.** Vite appends its sourcemap
+  inline (base64) into the evaluated code, already shifted by P+1 into AsyncFunction
+  function-source coordinates (P = wrapper padding, measured via native `toString` the way
+  Vite does; P=2 on V8). Probes report body lines (the `'use strict'` line included), so
+  bodyLine L maps at L+P (`rec.mapOffset`). `instrumentSource` weaving is LINE-PRESERVING
+  (never adds newlines), so the inline map stays valid after it. The offset is pinned
+  empirically three ways in `spike-debugger-ssr-seam.mjs` — measure, don't re-derive.
+- **SSR HMR re-evals constantly: re-registration must REBIND.** A second registration for
+  a URL rebinds existing breakpoints old→new through the new map using the stored SOURCE
+  line (`bp.sourceLine`), else they orphan on the old sid. Old recs stay registered while
+  in-flight frames may reference them. A per-url hash+exact-compare cache skips the
+  re-parse on identical re-evals; a changed body gets a fresh sid, and a failed weave
+  self-heals to the native body (reclaiming the sid).
+- **Lines remap; NAMES do not (known limitation).** `evaluateOnCallFrame`/Variables see
+  transformed identifiers (`__vite_ssr_import_0__…`) — the eval closures capture the woven
+  body's scope. Name remapping via `map.names` is deliberate future polish.
+- **Indirect eval is out of reach, by construction.** `vm.runInThisContext` and the
+  loader's own `compileWrapper` use INDIRECT eval, which no constructor seam can catch
+  (the loader path is instrumented at its source). Without an inline map — or without
+  `sourcesContent` — the body registers honestly as its own script; never guess lines
+  against a source we cannot display.
+- **A headless debug spike must forward the debug SAB.** The headless harness
+  (`lib/spike-harness.mjs` + `process-worker.mjs`) never forwarded `debugSab`/`debugLang`
+  before, so the debugger silently never attached. Both now mirror the browser twin
+  (`core/src/workers/process-worker.ts`): init/bootProcess carry the SAB + language, and
+  `dbg-cmd` routes to `dispatchDebugCommand`. Additive — null for non-debug processes.
 - **Pause = `Atomics.wait` on the debug SAB.** A guest runs in its own Process
   Worker, so hitting a breakpoint genuinely parks the thread on `protocol/debug.js`'s
   SAB. The kernel writes CDP commands into that SAB + `Atomics.notify`s; a **running**
@@ -5258,14 +5316,17 @@ a **second SAB** the paused worker parks on. Load-bearing details:
   `.py` inside Pyodide (CPython/Wasm), which never passes through the loader — hence the
   skip above (otherwise you'd get a bogus target + start-gate latency + a needlessly
   instrumented shim, and `.py` breakpoints that never bind).
-- **Zero cost when off.** `debugger.js` + `instrument.js` + the vendored `acorn.mjs`
-  live in a lazy `import()` chunk (~195 KB) fetched only when a debug SAB is present.
+- **Zero cost when off.** `debugger.js` + `instrument.js` + `sourcemap.js` + the vendored
+  `acorn.mjs` live in a lazy `import()` chunk fetched only when a debug SAB is present.
   Keep it that way — never add a static top-level import of them into the always-loaded
-  worker bundle.
+  worker bundle. The seam installs nothing without `VV_DEBUG` (a control boot has zero
+  debug targets), and the sync hook is one global read per call.
 - **Keep all CDP sides in sync.** The backend (`runtime/debugger.js`), the SAB ABI
   (`protocol/debug.js`, kernel + worker halves), the kernel routing (`kernel.js`,
-  `kernel-worker.ts`, `process-worker.ts`), and the client (`studio/src/vv/debug-session.ts`)
-  are one contract — change them together and re-run `scripts/spike-debugger.mjs`.
+  `kernel-worker.ts`, `process-worker.ts`), the headless twin (`scripts/process-worker.mjs`
+  + `lib/spike-harness.mjs`), and the client (`studio/src/vv/debug-session.ts`) are one
+  contract — change them together and re-run `scripts/spike-debugger.mjs` plus the seam
+  spikes (`spike-debugger-ssr-seam.mjs` offline, `spike-debugger-ssr.mjs` net).
 - **Not the preview DevTools.** This debugs Node guests; the chii/chobitsu Sources
   panel (`sw.js`, preview iframe) debugs preview **browser** JS and is a separate path.
 
@@ -5997,6 +6058,12 @@ cost multiple sessions:
   `evaluateOnCallFrame` (with TDZ), top-level `debugger;`, the real SAB channel, and an
   end-to-end `worker_threads` pause→evaluate→resume. **Run after any debugger change.**
   No network.
+- `node scripts/spike-debugger-ssr-seam.mjs` — the SSR eval seam's offline gate: the real
+  vite ModuleRunner + ssrTransform (fake fetchModule transport) against `createDebugger`,
+  source-line breakpoints, HMR rebind, the P-offset round-trip. Dual-mode: without
+  node_modules it falls back to a representative body + an independent VLQ encoder oracle.
+  No network. `node scripts/spike-debugger-ssr.mjs` is the IN-VM acceptance (net, boots a
+  kernel): vite SSR under VV_DEBUG, paused on the original .ts line, evaluate/step/resume.
 - Browser smoke test: `npm run dev` (studio, Vite — opens on `http://localhost:5173`
   by default), pick a project + Run, then check the terminal (Vite/Nest colored
   output), edit a file in Monaco (⌘S to save → HMR/restart), and the preview iframe.
@@ -6033,9 +6100,10 @@ the gap can't silently regress.
 - **Change the syscall ABI**: edit `protocol/syscall.js` (+ its format comment) and
   update all three sides (`fs-client.js`, `fs-server.js`, `kernel.js`) together.
 - **Work on the debugger**: edit `runtime/instrument.js` (probes), `runtime/debugger.js`
-  (CDP backend), `protocol/debug.js` (SAB ABI), and/or `studio/src/vv/debug-session.ts`
-  (client) — they are one CDP contract, so change the relevant sides together and
-  re-run `node scripts/spike-debugger.mjs`. See the breakpoint-debugger gotcha above.
+  (CDP backend + eval seam), `runtime/sourcemap.js` (line remap), `protocol/debug.js` (SAB
+  ABI), and/or `studio/src/vv/debug-session.ts` (client) — they are one CDP contract, so
+  change the relevant sides together and re-run `node scripts/spike-debugger.mjs` (+
+  `spike-debugger-ssr-seam.mjs` for the seam). See the breakpoint-debugger gotcha above.
 - **Work on Source Control (git)**: edit `studio/src/vv/scm-session.ts` (multi-repo
   store — `RepoState[]`, one per workspace folder; every op takes a `root`), `git-fs.ts`
   (isomorphic-git ⇄ VFS adapter), and `SourceControlPanel.tsx` (per-repo sections). The

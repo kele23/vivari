@@ -540,7 +540,9 @@ Three pieces, all lazy-loaded only when `VV_DEBUG` is set (zero cost otherwise):
   see the exact block scope). Self-heals to the original source on any parse failure.
 - **In-guest CDP backend** (`packages/runtime/debugger.js`) — script registry,
   breakpoint binding, call-stack frames, RemoteObject table, and the synchronous pause
-  loop. Emits `Debugger.scriptParsed/paused/resumed`.
+  loop. Emits `Debugger.scriptParsed/paused/resumed`. A second entry point
+  (`instrumentEvaluated` + `installEvalSeam`, §7.2.2) covers constructor-built code that
+  never passes the loader, remapping lines through `packages/runtime/sourcemap.js`.
 - **Studio client** (`packages/studio/src/vv/debug-session.ts` + `DebugPanel.tsx`) —
   the CDP client that drives Monaco gutter breakpoints, the paused-line highlight, and
   a VS Code-style Call Stack / Variables / Watch panel, opened from the ActivityBar's
@@ -633,6 +635,62 @@ would instrument our own 2500-line launcher shim and offer breakpoints in it, wh
 the wrong program. The CDP shape
 is shared so the same backend can later also feed the chii Sources panel — distinct
 from §8.5, which debugs preview **browser** JS via chobitsu.
+
+#### 7.2.2 The eval seam: constructor-built code (Vite SSR)
+
+The loader hook above only sees code that goes through `module.js`. Vite's SSR
+ModuleRunner evaluates modules with `new AsyncFunction(...)`, and `vm.compileFunction`
+uses `new Function` — neither passes the loader, so SSR/backend sources used to be
+invisible to the debugger. The seam is a second entry point into the same instrumenter,
+in two halves:
+
+- **Async half — `installEvalSeam()`** (`debugger.js`, called from `index.js`'s
+  `VV_DEBUG` attach block). There is no native `globalThis.AsyncFunction`: Vite captures
+  `async function(){}.constructor` — the intrinsic `%AsyncFunction.prototype%.constructor`
+  — at import time (`module-runner.js`), so a bare global assignment is inert. The seam
+  patches THAT constructor, before the entry compiles (hence before vite loads), and Vite
+  then captures the patched one. The property is non-writable but configurable, so it is
+  redefined with `Object.defineProperty` (kept writable afterwards). Generic on purpose:
+  no vite-specific code in the runtime — any evaluator building through the intrinsic is
+  covered, which is why this was chosen over wrapping vite's `ESModulesEvaluator`.
+- **Sync half — the `OcFunction` hook** (`index.js`): one `__vvDebugHook` global read
+  per `new Function`/`vm.compileFunction` call, weaving the body through the same
+  `instrumentEvaluated`. Zero cost when no debug session is attached.
+
+`instrumentEvaluated(body)` parses only bodies whose trailing `//# sourceURL=` names an
+absolute path of the guest's own source (node_modules, virtual `/@id/` modules and
+already-woven bodies are rejected before any parse). A trailing inline base64 source map
+with `sourcesContent` registers the script against the ORIGINAL source; without one the
+transformed body registers honestly as its own script — lines are never guessed.
+
+**Coordinates.** Probes report BODY lines (1-based, the `'use strict'` directive
+included). Vite appends its inline map PRE-SHIFTED by P+1 into AsyncFunction
+function-source coordinates, where P is the wrapper padding measured through the native
+`toString` (the same measurement Vite does; P=2 on V8). Each mapped rec carries
+`mapOffset = P`, so bodyLine L ↔ function-source line L+P; `sourcemap.js` — a
+dependency-free base64→UTF-8 + VLQ decoder + 1-based line mapper
+(`toSource`/`toGenerated`/`toGeneratedAtOrAfter`), in the same lazy chunk — does the
+remap. Weaving is line-preserving, so the inline map stays valid after it. The remap is
+wired into `setBreakpointByUrl`, `bindPending`, `buildCallFrames` and
+`getPossibleBreakpoints`; a breakpoint stores both the user's `sourceLine` and the
+transformed `line` the probes hit.
+
+**HMR.** SSR re-evaluates constantly. A second registration for a URL rebinds existing
+breakpoints old→new through the new map using the stored source line; old recs stay
+registered while in-flight frames may still reference them. A per-url hash + exact-compare
+cache skips the re-parse on identical re-evals; a changed body gets a fresh sid, and a
+failed weave self-heals to the native body (the sid is reclaimed).
+
+**Boundaries.** Lines remap, names do not: `evaluateOnCallFrame`/Variables see
+transformed identifiers (`__vite_ssr_import_0__…`); name remapping through `map.names`
+is future polish. Indirect eval (`vm.runInThisContext`, the loader's own
+`compileWrapper`) is unreachable by any constructor seam — the loader path is
+instrumented at its source instead.
+
+The headless twin mirrors the browser routing: `scripts/lib/spike-harness.mjs` forwards
+`debugSab`/`debugLang` in init and `scripts/process-worker.mjs` handles `dbg-cmd` →
+`dispatchDebugCommand`, exactly like `core/src/workers/process-worker.ts`. Without that
+forwarding a headless debug spike silently never attaches.
 
 ### 7.3 The engine underneath (`error-stack.js`)
 

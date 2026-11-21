@@ -240,6 +240,12 @@ const SPIKES = [
   // the debug-command SharedArrayBuffer channel (real Atomics across a worker).
   // Pure JS + vendored acorn, no kernel/wasm.
   { name: "debugger", file: "spike-debugger.mjs", net: false, timeout: 60000 },
+  // The debugger's SSR eval seam: the REAL vite ModuleRunner + ssrTransform eval
+  // path (installed vite, fake fetchModule transport) against createDebugger —
+  // source-line breakpoints through the AsyncFunction constructor seam, HMR
+  // rebind, and the padding-offset round-trip. Pure JS + node_modules, no
+  // kernel/wasm.
+  { name: "debugger-ssr-seam", file: "spike-debugger-ssr-seam.mjs", net: false, timeout: 60000 },
   // pnpm/cmd-shim bin unwrap — pure parser, no kernel/wasm needed.
   { name: "cmd-shim", file: "spike-cmd-shim.mjs", net: false, timeout: 60000 },
   // Import/export/share codecs (P2): zip writer verified with Node's zlib, and
@@ -534,6 +540,15 @@ const SPIKES = [
   // Astro dev server — Vite + @astrojs/compiler (Go/wasm) + esbuild; exercises the full
   // loader stack (live-binding fallback, globalThis.fs pre-seat, re-export getters). Heavy.
   { name: "astro", file: "spike-astro.mjs", net: true, timeout: 600000 },
+  // The breakpoint debugger's SSR eval seam, IN-VM (ticket kele23/vivari#5): boots a
+  // kernel, installs real vite, runs an SSR backend under VV_DEBUG, and drives the
+  // real CDP flow over the debug SAB — breakpoint on an SSR module's ORIGINAL .ts
+  // line -> Debugger.paused at that source line through the real ModuleRunner ->
+  // evaluateOnCallFrame -> stepOver -> resume -> response completes; plus the
+  // node_modules exclusion and a no-VV_DEBUG control boot. The offline seam spike
+  // (debugger-ssr-seam) proves the same seam on the host with a fake transport; this
+  // one is the ticket's literal in-VM acceptance. needsWasm: it boots a kernel.
+  { name: "debugger-ssr", file: "spike-debugger-ssr.mjs", net: true, needsWasm: true, timeout: 900000 },
   // Python: the WSGI/ASGI bridge + the seven Python templates, driven against real
   // Pyodide. Kernel-free by necessity (bootPyodide can't be reached from Node —
   // see the header of the spike), so it proves Python semantics and protocol
