@@ -12124,3 +12124,57 @@ The FS-worker/opfs-persistence side is what enforces the manifest barrier and th
 `node --check`, `tsc -p packages/core/tsconfig.workers.json` and `npm run typecheck:sdk`
 are green, and the lane core is exercised end to end against a fake OPFS in its own harness.
 A real-browser pass of the flag remains the gate for the performance claim.
+
+### SSR breakpoints bind on the original `.ts` line — the debugger's eval seam (kele23/vivari#5)
+
+The breakpoint debugger instrumented guest code in the require loader, but Vite's SSR
+ModuleRunner evaluates modules with `new AsyncFunction(...)` — SSR/backend sources never
+passed the loader, so their breakpoints never bound. **The ticket's original premise was
+confuted:** there is no native `globalThis.AsyncFunction` to patch; Vite captures
+`async function(){}.constructor` (the intrinsic `%AsyncFunction.prototype%.constructor`)
+AT IMPORT TIME (`module-runner.js:23`), so a bare global assignment is inert. Option 1
+patches the intrinsic prototype's constructor at debug attach — before the entry compiles,
+hence before vite loads — and Vite then captures the patched one. Chosen over a
+vite-specific `ESModulesEvaluator.prototype` wrap: generic, no vite-specific code in the
+runtime, catches any evaluator plus `vm.compileFunction` (the sync `OcFunction` hook in
+`index.js`, one `__vvDebugHook` global read per call). Two properties of the intrinsic
+made this non-obvious: the constructor is NON-WRITABLE (configurable), unlike
+`Function.prototype.constructor`, so it takes `Object.defineProperty`; and Vite appends
+its sourcemap INLINE (base64), pre-shifted by P+1 into AsyncFunction function-source
+coordinates, while probes report BODY lines (the `'use strict'` line included) — so
+bodyLine L maps at L+P (P = wrapper padding, measured via native `toString` the way Vite
+does; P=2 on V8), pinned empirically three ways in the offline spike. Weaving is
+line-preserving, so the inline map survives it.
+
+`debugger.js` gained `instrumentEvaluated(body)` + `installEvalSeam()`, with the remap
+(`sourcemap.js`, a dependency-free base64→UTF-8 + VLQ decoder + 1-based line mapper in the
+lazy debug chunk) wired into `setBreakpointByUrl`, `bindPending`, `buildCallFrames` and
+`getPossibleBreakpoints`. SSR HMR re-evals constantly, so a second registration for a URL
+REBINDS existing breakpoints old→new through the new map using the stored source line
+(`bp.sourceLine`) — else they orphan on the old sid. Old recs stay registered while
+in-flight frames may reference them; a per-url hash+exact-compare cache skips identical
+re-evals, and a failed weave self-heals to the native body (reclaiming the sid).
+
+**Evidence.** `scripts/spike-debugger-ssr-seam.mjs` (offline, 68 assertions) drives the
+REAL vite ModuleRunner + ssrTransform with a fake fetchModule transport against
+`createDebugger`; it is dual-mode because the CI toolchain gates run without
+node_modules (bare-tree fallback with an independent VLQ encoder oracle).
+`scripts/spike-debugger-ssr.mjs` (net, boots a kernel) is the ticket's literal IN-VM
+acceptance, on vite 8.3.8 resolved in-VM: a breakpoint on the ORIGINAL `src/api.ts`
+line 5 pauses at `lineNumber` 4 (0-based) through the real ModuleRunner,
+`evaluateOnCallFrame('local') === 42`, stepOver onto the next source line reads
+`'total' === 43`, and resume completes the request — HTTP 200 `{"answer":43}`.
+node_modules stays excluded (no `scriptParsed`, breakpoint `locations: []`), and a
+control boot WITHOUT `VV_DEBUG` serves normally with zero debug targets. The headless
+harness had never forwarded the debug SAB — `lib/spike-harness.mjs` +
+`process-worker.mjs` now carry `debugSab`/`debugLang` in init/bootProcess and handle
+`dbg-cmd` → `dispatchDebugCommand`, mirroring the browser twin (additive; null for
+non-debug processes).
+
+**Limitations (deliberate).** Lines remap, NAMES do not — `evaluateOnCallFrame`/Variables
+see transformed identifiers (`__vite_ssr_import_0__…`); remapping through `map.names`
+is future polish. Indirect eval (`vm.runInThisContext`, the loader's `compileWrapper`)
+is unreachable by any constructor seam — out of scope; the loader path is instrumented at
+its source. Without an inline map (or without `sourcesContent`) the body registers
+honestly as its own script, never guessed lines. Fork-only Option 1: no public SDK surface
+change — the debug hook is internal runtime glue (see FORK.md).

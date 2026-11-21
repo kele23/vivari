@@ -16,6 +16,9 @@ upstream as small PRs, everything else is justified and recorded here.
     in pnpm's own process instead of the environment every command inherits. It was written for
     the npm 12.2.1 pin and is kept now that the pin is gone: those are `npm_config_*` names, so
     an npm invocation in the same environment sees another package manager's configuration.
+  - The breakpoint debugger's SSR eval seam (`installEvalSeam` in `packages/runtime/debugger.js`,
+    kele23/vivari#5 Option 1) — internal runtime glue behind `VV_DEBUG`, no public SDK surface
+    change; a feature rather than a self-contained fix, so it stays fork-only.
 - **Scope: the whole project except `packages/studio`.** The Studio IDE app is the downstream
   product's business: it keeps its own fork of it (`ide/` in `facilis-dev/facilis`) and its
   own copy of the preview Service Worker (`ide/public/sw.js`). One coupling to know —

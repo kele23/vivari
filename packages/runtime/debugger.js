@@ -17,9 +17,17 @@
 // `Atomics.wait` over a debug SharedArrayBuffer; in headless tests it drains a
 // queue. Everything else (breakpoints, script registry, RemoteObjects) is
 // transport-agnostic.
+//
+// Evaluated code (Vite SSR's ModuleRunner builds modules with new AsyncFunction,
+// vm.compileFunction with new Function) never passes the require loader, so a
+// second entry point — instrumentEvaluated() + installEvalSeam() — weaves the
+// same probes into constructor-built bodies that name a project sourceURL, and
+// remaps lines through the body's trailing inline source map (sourcemap.js).
+// See scripts/spike-debugger-ssr-seam.mjs for the end-to-end proof.
 
 import { instrumentSource } from "./instrument.js";
 import { pathToScriptUrl, scriptUrlToPath } from "./file-url.js";
+import { createLineMapper, decodeBase64Utf8 } from "./sourcemap.js";
 
 const PROTOCOL_HASH = "vivari";
 
@@ -61,8 +69,21 @@ export function createDebugger({ send, waitForCommand, readFileSync = null } = {
   // The frame objects (top→bottom) captured at the current pause; call-frame ids and
   // scope object ids index into this.
   let pausedFrames = [];
-  const breakpoints = new Map(); // id -> { id, url, sid, line, condition }
+  const breakpoints = new Map(); // id -> { id, url, sid, line, sourceLine, condition }
   let bpSeq = 0;
+
+  // ── evaluated-code seam state ───────────────────────────────────────────────
+  // Bodies evaluated through a Function/AsyncFunction constructor (Vite SSR,
+  // vm.compileFunction) never pass the require loader; instrumentEvaluated() is
+  // their entry point. The cache holds the LAST body per url so identical
+  // re-evals skip the parse; a changed body gets a fresh sid + re-registration.
+  const evalCache = new Map(); // url -> { hash, body, woven, sid }
+  // AsyncFunction wrapper padding (lines before the body in the native
+  // toString()), measured by installEvalSeam(). Vite pre-shifts its inline maps
+  // by P + 1 into function-source coordinates; probes report BODY lines (the
+  // '"use strict";' line included), so a body line L maps at L + P.
+  let evalMapOffset = 0;
+  let evalSeamInstalled = false;
 
   // `armed` short-circuits the hot `line()` probe when nothing could pause.
   let armed = false;
@@ -224,7 +245,9 @@ export function createDebugger({ send, waitForCommand, readFileSync = null } = {
       out.push({
         callFrameId: "cf:" + i,
         functionName: f.name || "",
-        location: { scriptId, lineNumber: Math.max(0, (f.line | 0) - 1), columnNumber: 0 },
+        // Probes report transformed (body) lines; surface the ORIGINAL source
+        // line for mapped recs (identity for loader-registered scripts).
+        location: { scriptId, lineNumber: Math.max(0, transformedToSource(rec, f.line | 0) - 1), columnNumber: 0 },
         url: rec ? rec.url : "",
         scopeChain: [
           {
@@ -430,8 +453,34 @@ export function createDebugger({ send, waitForCommand, readFileSync = null } = {
     return hit;
   }
 
+  // ── source-map remapping (only for recs that carry an inline map) ──────────
+  // rec.map's generated coordinates are FUNCTION-SOURCE lines (Vite pre-shifts
+  // the inline map by the AsyncFunction wrapper padding + its strict line);
+  // rec.mapOffset = P converts between those and the BODY lines the probes
+  // report: bodyLine L ↔ function-source line L + P. Both helpers are 1-based
+  // and fall back to identity, so unmapped lines (the strict directive, trailing
+  // comments, generated-only lines) degrade to the transformed coordinate rather
+  // than guessing an original line.
+  function transformedToSource(rec, transformedLine1) {
+    if (!rec || !rec.map) return transformedLine1;
+    const s = rec.map.toSource(transformedLine1 + rec.mapOffset);
+    return s == null ? transformedLine1 : s;
+  }
+
+  function sourceToTransformed(rec, sourceLine1) {
+    if (!rec || !rec.map) return sourceLine1;
+    const g = rec.map.toGenerated(sourceLine1);
+    if (g != null) return Math.max(1, g - rec.mapOffset);
+    // Unmapped source line (a TS type-only line, a comment): slide forward to
+    // the next source line that does map, mirroring resolveLine's slide.
+    const next = rec.map.toGeneratedAtOrAfter(sourceLine1);
+    if (next != null) return Math.max(1, next - rec.mapOffset);
+    return sourceLine1; // nothing mapped at/after — let resolveLine do its best
+  }
+
   // ── breakpoint resolution ───────────────────────────────────────────────────
   // Bind a requested (url, line1) to the nearest breakable line at or after it.
+  // Works in TRANSFORMED (body) coordinates — callers remap first.
   function resolveLine(sid, line1) {
     const rec = scripts.get(sid);
     if (!rec) return line1;
@@ -460,9 +509,12 @@ export function createDebugger({ send, waitForCommand, readFileSync = null } = {
       pendingBreakpoints.push({ id: bpId, url, line1, condition });
     }
     for (const sid of targets) {
-      const bound = resolveLine(sid, line1);
-      breakpoints.set(bpId, { id: bpId, url: scripts.get(sid).url, sid, line: bound, condition });
-      locations.push({ scriptId: String(sid), lineNumber: bound - 1, columnNumber: 0 });
+      const rec = scripts.get(sid);
+      const bound = resolveLine(sid, sourceToTransformed(rec, line1));
+      // sourceLine keeps the USER's line so a re-eval (HMR) can rebind through
+      // the new body's map; line stays in transformed coords for the probes.
+      breakpoints.set(bpId, { id: bpId, url: rec.url, sid, line: bound, sourceLine: line1, condition });
+      locations.push({ scriptId: String(sid), lineNumber: transformedToSource(rec, bound) - 1, columnNumber: 0 });
     }
     rearm();
     reply(id, { breakpointId: bpId, locations });
@@ -475,11 +527,11 @@ export function createDebugger({ send, waitForCommand, readFileSync = null } = {
       const p = pendingBreakpoints[i];
       const matches = p.url === rec.url || toUrl(p.url) === rec.url || fromUrl(p.url) === rec.path;
       if (!matches) continue;
-      const bound = resolveLine(rec.sid, p.line1);
-      breakpoints.set(p.id, { id: p.id, url: rec.url, sid: rec.sid, line: bound, condition: p.condition });
+      const bound = resolveLine(rec.sid, sourceToTransformed(rec, p.line1));
+      breakpoints.set(p.id, { id: p.id, url: rec.url, sid: rec.sid, line: bound, sourceLine: p.line1, condition: p.condition });
       emit("Debugger.breakpointResolved", {
         breakpointId: p.id,
-        location: { scriptId: String(rec.sid), lineNumber: bound - 1, columnNumber: 0 },
+        location: { scriptId: String(rec.sid), lineNumber: transformedToSource(rec, bound) - 1, columnNumber: 0 },
       });
       pendingBreakpoints.splice(i, 1);
     }
@@ -531,8 +583,10 @@ export function createDebugger({ send, waitForCommand, readFileSync = null } = {
       case "Debugger.getPossibleBreakpoints": {
         const s = params.start || {};
         const sid = Number(s.scriptId);
-        const bound = resolveLine(sid, (s.lineNumber | 0) + 1);
-        return reply(id, { locations: [{ scriptId: String(sid), lineNumber: bound - 1, columnNumber: 0 }] });
+        const rec = scripts.get(sid);
+        const bound = resolveLine(sid, sourceToTransformed(rec, (s.lineNumber | 0) + 1));
+        const line1 = transformedToSource(rec, bound);
+        return reply(id, { locations: [{ scriptId: String(sid), lineNumber: line1 - 1, columnNumber: 0 }] });
       }
       case "Debugger.pause":
         requestPause = true;
@@ -655,6 +709,187 @@ export function createDebugger({ send, waitForCommand, readFileSync = null } = {
     }
   }
 
+  // ── public: evaluated-code seam (Vite SSR / vm.compileFunction) ─────────────
+  // Code built through a Function/AsyncFunction constructor never passes the
+  // require loader, so it used to be invisible to the debugger (SSR/backend
+  // breakpoints never bound). installEvalSeam() + index.js's OcFunction hook
+  // route such bodies here. Returns the woven body, or null to build natively.
+  //
+  // Known limitation: evaluateOnCallFrame / the Scope panel see TRANSFORMED
+  // identifiers (e.g. ssrTransform's __vite_ssr_import_0__ bindings) — the eval
+  // closures capture the woven body's scope, and name remapping through the map
+  // is deliberately not attempted. Lines remap; names do not.
+  //
+  // Cheap filter FIRST: only a body whose trailing //# sourceURL= names an
+  // absolute VFS path of the guest's OWN source is ever parsed. Everything else
+  // (Vite's padding probe, escape-hatch bodies, virtual /@id/ modules,
+  // node_modules) returns null before any decode/parse work.
+  function hashString(s) {
+    let h = 0x811c9dc5;
+    for (let i = 0; i < s.length; i++) {
+      h ^= s.charCodeAt(i);
+      h = Math.imul(h, 0x01000193);
+    }
+    return h >>> 0;
+  }
+
+  // Rebind breakpoints bound to a replaced script through the NEW rec's map,
+  // using each breakpoint's stored SOURCE line. SSR HMR re-evals constantly;
+  // without this, every re-eval would orphan the breakpoints bound to the old
+  // sid. Old recs stay registered — in-flight paused frames reference their sids.
+  function rebindBreakpoints(oldSid, newRec) {
+    for (const bp of breakpoints.values()) {
+      if (bp.sid !== oldSid) continue;
+      const sourceLine1 = bp.sourceLine != null ? bp.sourceLine : bp.line;
+      const bound = resolveLine(newRec.sid, sourceToTransformed(newRec, sourceLine1));
+      bp.sid = newRec.sid;
+      bp.line = bound;
+      emit("Debugger.breakpointResolved", {
+        breakpointId: bp.id,
+        location: { scriptId: String(newRec.sid), lineNumber: transformedToSource(newRec, bound) - 1, columnNumber: 0 },
+      });
+    }
+  }
+
+  function instrumentEvaluated(body) {
+    let sid = 0;
+    try {
+      if (typeof body !== "string" || body.length === 0) return null;
+      const marker = "//# sourceURL=";
+      const at = body.lastIndexOf(marker);
+      if (at === -1) return null;
+      const lineEnd = body.indexOf("\n", at);
+      let rawId = body.slice(at + marker.length, lineEnd === -1 ? body.length : lineEnd).trim();
+      if (rawId.startsWith("file://")) rawId = fromUrl(rawId);
+      const cut = rawId.search(/[?#]/); // module ids may carry a ?query / #hash
+      const filePath = cut === -1 ? rawId : rawId.slice(0, cut);
+      if (!filePath.startsWith("/")) return null; // not an absolute VFS path
+      if (filePath.startsWith("/@id/") || filePath.includes("\0")) return null; // virtual module
+      if (!shouldInstrument(filePath)) return null; // node_modules, .json/.node/.wasm
+      // An already-woven body keeps its existing probes; never weave twice.
+      if (body.includes("__vvdbg.line(") || body.includes("__vvdbg.push(")) return null;
+      const url = toUrl(filePath);
+
+      // Identical re-evals reuse the woven body without re-parsing. The hash is
+      // a cheap reject; the full string compare makes the hit exact (a collision
+      // must never substitute one body's probes for another's).
+      const hash = hashString(body);
+      const cached = evalCache.get(url);
+      if (cached && cached.hash === hash && cached.body === body) {
+        const rec = scripts.get(cached.sid);
+        if (rec) {
+          bindPending(rec);
+          return cached.woven;
+        }
+      }
+
+      sid = ++scriptSeq;
+      // Line-preserving weaving: the inline map (taken against the body) stays
+      // valid after it. Throws on unparseable bodies → self-heal below.
+      const r = instrumentSource(body, sid);
+
+      // Trailing inline source map, if any. Vite's SSR evaluator appends one
+      // PRE-SHIFTED into function-source coordinates; with it, the script is
+      // registered against the ORIGINAL source. Without one (or without the
+      // original content to show), register the transformed body honestly —
+      // never guess lines against a source we cannot display.
+      let source = body;
+      let mapper = null;
+      const smAt = body.lastIndexOf("//# sourceMappingURL=");
+      if (smAt > at) {
+        const smEnd = body.indexOf("\n", smAt);
+        const smLine = body.slice(smAt, smEnd === -1 ? body.length : smEnd).trim();
+        const m = /^\/\/# sourceMappingURL=data:application\/json;(?:charset=utf-8;)?base64,([A-Za-z0-9+/=]+)$/.exec(smLine);
+        if (m) {
+          try {
+            const map = JSON.parse(decodeBase64Utf8(m[1]));
+            const content = map && map.sourcesContent && map.sourcesContent[0];
+            const candidate = typeof content === "string" ? createLineMapper(map) : null;
+            if (candidate) {
+              mapper = candidate;
+              source = content;
+            }
+          } catch {
+            /* malformed map — fall back to the transformed body */
+          }
+        }
+      }
+
+      const rec = {
+        sid,
+        path: filePath,
+        url,
+        source, // original source when mapped (what getScriptSource shows)
+        transformed: body, // the evaluated body the probes' lines refer to
+        map: mapper,
+        mapOffset: mapper ? evalMapOffset : 0,
+        breakable: new Set(r.breakableLines),
+        endLine: source.split("\n").length,
+        isModule: true,
+      };
+      const oldSid = scriptByUrl.get(url);
+      scripts.set(sid, rec);
+      scriptByUrl.set(url, sid);
+      evalCache.set(url, { hash, body, woven: r.code, sid });
+      emitScriptParsed(rec);
+      if (oldSid != null && oldSid !== sid) rebindBreakpoints(oldSid, rec);
+      bindPending(rec);
+      return r.code;
+    } catch {
+      if (sid) scriptSeq--; // reclaim the id, exactly like instrument()
+      return null; // the caller builds the native function from the original body
+    }
+  }
+
+  // Install the constructor seam. Vite's ModuleRunner captures
+  // `async function(){}.constructor` AT IMPORT TIME (module-runner.js:
+  // `const AsyncFunction = async function() {}.constructor`), and there is no
+  // native globalThis.AsyncFunction — so patching the intrinsic prototype's
+  // constructor HERE, before the entry (and thus vite) loads, is what makes SSR
+  // modules instrumentable. A bare globalThis.AsyncFunction assignment would be
+  // inert. Debug-gated: only the attach block in index.js calls this.
+  //
+  // Returns the measured wrapper padding P (lines before the body in the native
+  // toString()). Bodies without a project sourceURL build NATIVELY, so Vite's
+  // own padding measurement through the patched constructor stays exact.
+  function installEvalSeam() {
+    if (evalSeamInstalled) return evalMapOffset;
+    const proto = Object.getPrototypeOf(async function () {});
+    const NativeAsyncFunction = proto.constructor;
+    // Same measurement Vite uses (getAsyncFunctionDeclarationPaddingLineCount).
+    const marker = "/*code*/";
+    const sample = new NativeAsyncFunction("a", "b", marker).toString();
+    const idx = sample.indexOf(marker);
+    evalMapOffset = idx > 0 ? sample.slice(0, idx).split("\n").length - 1 : 0;
+    const OcAsyncFunction = function AsyncFunction(...args) {
+      if (args.length) {
+        const body = args[args.length - 1];
+        if (typeof body === "string") {
+          let woven = null;
+          try {
+            woven = instrumentEvaluated(body);
+          } catch {
+            woven = null;
+          }
+          if (typeof woven === "string" && woven.length) args = args.slice(0, -1).concat(woven);
+        }
+      }
+      // Reflect.construct + prototype identity — the same pattern as index.js's
+      // OcFunction (the rsbuild fix): new.target must survive subclassing, and
+      // instances must keep the intrinsic AsyncFunction.prototype.
+      return Reflect.construct(NativeAsyncFunction, args, new.target || OcAsyncFunction);
+    };
+    OcAsyncFunction.prototype = NativeAsyncFunction.prototype;
+    Object.setPrototypeOf(OcAsyncFunction, NativeAsyncFunction);
+    // %AsyncFunction.prototype%.constructor is NON-WRITABLE (unlike
+    // Function.prototype.constructor) but configurable — a plain assignment
+    // throws in strict mode, so redefine it. Keep it writable afterwards, the
+    // shape Function.prototype has, so later code can reassign it normally.
+    Object.defineProperty(proto, "constructor", { value: OcAsyncFunction, writable: true, configurable: true });
+    evalSeamInstalled = true;
+    return evalMapOffset;
+  }
+
   // ── public: inbound command entry point (running state) ──────────────────────
   function onCommand(cmd) {
     if (!cmd || typeof cmd !== "object") return;
@@ -696,6 +931,8 @@ export function createDebugger({ send, waitForCommand, readFileSync = null } = {
   return {
     __vvdbg,
     instrument,
+    instrumentEvaluated,
+    installEvalSeam,
     shouldInstrument,
     onCommand,
     waitForStart,

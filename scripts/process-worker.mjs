@@ -124,6 +124,8 @@ parentPort.on("message", (msg) => {
       spec: msg.spec,
       fsPort: msg.fsPort, // #14: fs syscalls ring the File System Worker over this port
       threadPort: msg.threadPort, // #16 stage 2b: our parentPort, if we are a thread
+      debugSab: msg.debugSab, // breakpoint debugger command channel (present under VV_DEBUG)
+      debugLang: msg.debugLang, // which backend attaches: "js" (instrumented) or "python"
       postRaw: (m, transfer) => parentPort.postMessage(m, transfer || []),
       send: (type, extra) => parentPort.postMessage({ type, ...extra }),
       onReady: (c) => {
@@ -202,6 +204,9 @@ parentPort.on("message", (msg) => {
   // A catchable signal (SIGTERM/SIGINT) the kernel is delivering to us.
   else if (msg.type === "signal") onControl((c) => c.dispatchSignal(msg));
   else if (msg.type === "winsize") onControl((c) => c.dispatchWinsize(msg));
+  // A CDP debugger command for this process while RUNNING (paused commands arrive
+  // over the debug SAB instead). Mirrors the browser twin's dbg-cmd handler.
+  else if (msg.type === "dbg-cmd") onControl((c) => c.dispatchDebugCommand(msg.data));
   // An async fetch result relayed by the kernel (parallel downloads).
   else if (msg.type === "fetch-done") onControl((c) => c.dispatchFetch(msg));
 });

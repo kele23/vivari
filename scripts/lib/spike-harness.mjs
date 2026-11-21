@@ -86,7 +86,7 @@ export async function bootSpikeKernel({ npm = false, fetcher: fetcherOverride = 
     });
     const { port1, port2 } = new MessageChannel();
     fsWorker.postMessage({ type: "fs-register", client: info.pid, sab: info.sab, port: port2 }, [port2]);
-    const init = { type: "init", sab: info.sab, spec: info.spec, fsPort: port1 };
+    const init = { type: "init", sab: info.sab, spec: info.spec, fsPort: port1, debugSab: info.debugSab, debugLang: info.debugLang };
     if (info.threadPort) init.threadPort = info.threadPort;
     // A worker pool (tinypool, piscina, synckit) puts a MessagePort in workerData;
     // initTransferList is what knows those have to be transferred on to the child.
