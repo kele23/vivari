@@ -196,3 +196,26 @@ PASS, `npm run verify` PASS, offline tier 70/72 with the two expected host failu
 and reports the checkout is not the cause — the same pair fails on the pre-realign tree).
 Pre-rebase state kept local-only as `backup/facilis-main-2026-11-20` (`daceb39`).
 
+Realigned onto `upstream/master` (`1c0de76`, tagged `v1.3.5`) on 2026-11-21: one release
+since v1.3.4. PR #52 made the terminal behave like a real machine — TTY stdout with Node's
+`emitKeypressEvents`, one SIGINT per Ctrl-C, JSON fork messages,
+`process.getActiveResourcesInfo()`, bare `/bin` names on PATH, Safari's `ReadableStream`
+async iterator — and the preview SW now drops `X-Frame-Options`/`frame-ancestors` so a
+Nitro error page renders in the preview frame (upstream's studio copy; the IDE keeps its
+own `sw.js` and may want the same hunk). Twenty fork commits replayed, nothing dropped.
+One conflict, resolved as a union: `roadmap.md`, where upstream appended its #52 section
+exactly where the mirror-lane paragraph appends — both kept, the lane paragraph last; the
+range-diff shows the other 19 commits byte-identical and the lane files unchanged.
+Mid-sync, PR #6 (the SSR-eval debug seam) merged into `origin/facilis/main` (`54687fc`);
+the first `--force-with-lease` push rejected as stale is what surfaced it. Its commit
+(`80efb29`) was cherry-picked on top of the replay to keep the branch linear — the merge
+was trivial, so the content is identical. Gates on the final tree: `spike-esm`,
+`spike-bun-offline`, `spike-ci-tiers`, `spike-debugger` and `spike-debugger-ssr-seam`
+PASS, `npm run verify` PASS, `spike-debugger-ssr` (net, in-VM acceptance) PASS, offline
+tier 74/76 with only the two expected host failures (`python-offline` needs the host pip;
+`clean-checkout` re-runs it on a tracked-only tree). An earlier tier run on the
+pre-cherry-pick tree flaked `port-liveness` (`worker-unref-then-listen`, a
+message-delivery race): 3/3 standalone re-runs, the pre-realign tree and both full-tier
+re-runs are green on it — a timing flake, not a regression. Pre-rebase state kept
+local-only as `backup/facilis-main-2026-11-21` (`d2a8d52`).
+
